@@ -1,0 +1,1892 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zonako — Marché local par zone</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.25.0/babel.min.js"></script>
+<script src="https://cdn.cinetpay.com/seamless/main.js"></script>
+<style>
+  body { margin: 0; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+
+    const { useState, useEffect, useCallback } = React;
+
+    // Icônes légères en émoji (évite toute dépendance à un bundler pour ce fichier autonome)
+    function makeIcon(emoji) {
+      return function Icon({ size = 16, className = "", style = {}, strokeWidth }) {
+        return React.createElement(
+          "span",
+          { className, style: { fontSize: size, lineHeight: 1, display: "inline-block", ...style } },
+          emoji
+        );
+      };
+    }
+    const ShoppingBag = makeIcon("🛍️");
+    const Store = makeIcon("🏪");
+    const Bike = makeIcon("🚴");
+    const MapPin = makeIcon("📍");
+    const Plus = makeIcon("➕");
+    const X = makeIcon("✕");
+    const Package = makeIcon("📦");
+    const Check = makeIcon("✓");
+    const Clock = makeIcon("⏱️");
+    const Truck = makeIcon("🚚");
+    const ArrowLeft = makeIcon("←");
+    const Trash2 = makeIcon("🗑️");
+    const Lock = makeIcon("🔒");
+    const TrendingUp = makeIcon("📈");
+
+
+const DEFAULT_FEE_RATE = 0.05; // 5% commission par défaut, prélevée sur chaque vente vendeur
+const DEFAULT_ACCESS_FEE = 2000; // FCFA — abonnement mensuel vendeur/livreur par défaut
+const DEFAULT_TRIAL_DAYS = 7; // jours d'essai gratuit avant de devoir payer l'abonnement
+// Note : il n'y a plus de code propriétaire codé en dur ici — chaque personne qui
+// ouvre l'espace propriétaire pour la première fois sur un appareil crée son propre
+// code, stocké uniquement dans le localStorage de cet appareil (voir OwnerView).
+
+// --- Configuration CinetPay ---
+// Remplace apikey et site_id par tes identifiants marchand (Espace CinetPay > Intégration).
+// mode: "SANDBOX" pour tester sans vrai argent, "PRODUCTION" une fois validé par CinetPay.
+// notify_url: à héberger plus tard sur un petit backend qui reçoit la confirmation
+// serveur-à-serveur de CinetPay (voir note en fin de fichier). En attendant, le paiement
+// fonctionne quand même côté client grâce à CinetPay.waitResponse().
+const CINETPAY_CONFIG = {
+  apikey: "REMPLACE_PAR_TON_APIKEY_CINETPAY",
+  site_id: "REMPLACE_PAR_TON_SITE_ID_CINETPAY",
+  mode: "SANDBOX",
+  // Remplace par ton vrai domaine une fois déployé (ex: https://zonako-backend.onrender.com/api/cinetpay/notify).
+  // Cette route est gérée par server.js et vérifie chaque paiement auprès de CinetPay avant de le valider.
+  notify_url: "https://ton-domaine.com/api/cinetpay/notify",
+};
+
+const ZONES = [
+  "Abengourou", "Abidjan – Cocody", "Abidjan – Yopougon", "Abidjan – Adjamé",
+  "Abidjan – Marcory", "Bouaké", "Yamoussoukro", "San-Pédro", "Korhogo", "Daloa"
+];
+// Portée nationale : un vendeur peut choisir de vendre uniquement dans sa zone,
+// ou d'étendre sa vente à tout le territoire. Les acheteurs et livreurs ont le
+// même choix pour parcourir/livrer localement ou à l'échelle nationale.
+const NATIONAL = "Toutes les zones (national)";
+
+const CATEGORIES = [
+  { name: "Alimentation", emoji: "🍚" },
+  { name: "Mode", emoji: "👗" },
+  { name: "Électronique", emoji: "📱" },
+  { name: "Maison & Déco", emoji: "🛋️" },
+  { name: "Beauté & Santé", emoji: "💄" },
+  { name: "Services", emoji: "🔧" },
+];
+
+const FONT_STYLE = `
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap');
+  .f-display { font-family: 'Space Grotesk', sans-serif; }
+  .f-body { font-family: 'Inter', sans-serif; }
+  .f-mono { font-family: 'IBM Plex Mono', monospace; }
+  .ticket {
+    clip-path: polygon(0% 8px, 4px 0%, calc(100% - 4px) 0%, 100% 8px, 100% calc(100% - 8px), calc(100% - 4px) 100%, 4px 100%, 0% calc(100% - 8px));
+  }
+`;
+
+// ---------- Appels vers le backend partagé (API + base de données) ----------
+// Comme le frontend est servi par le même serveur Express, on utilise des chemins
+// relatifs — pas besoin de CORS ni de configurer une URL séparée.
+async function apiGet(path) {
+  const r = await fetch(path);
+  if (!r.ok) throw new Error(await r.text().catch(() => "Erreur serveur"));
+  return r.json();
+}
+async function apiSend(path, method, body, token) {
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const r = await fetch(path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
+  if (!r.ok) {
+    const msg = await r.text().catch(() => "Erreur serveur");
+    throw new Error(msg || "Erreur serveur");
+  }
+  return r.json();
+}
+
+// Petit pointeur local pour se souvenir "je suis connecté en tant que vendeur/livreur/
+// acheteur avec ce nom/téléphone" d'une visite à l'autre sur CET appareil — les
+// vraies données (produits, commandes, abonnement) vivent côté serveur, partagées
+// entre tous les appareils.
+function loadProfile(key) {
+  try {
+    const raw = localStorage.getItem(`profile_${key}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+function saveProfile(key, data) {
+  try {
+    localStorage.setItem(`profile_${key}`, JSON.stringify(data));
+  } catch {
+    // échec silencieux
+  }
+}
+function clearProfile(key) {
+  try {
+    localStorage.removeItem(`profile_${key}`);
+  } catch {
+    // rien à supprimer
+  }
+}
+
+function uid() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+
+// Lance un paiement CinetPay générique (utilisé pour les abonnements vendeur/livreur).
+// L'argent est collecté directement sur le compte marchand CinetPay du propriétaire
+// (celui associé à CINETPAY_CONFIG.site_id) — voir la note en fin de fichier pour
+// savoir où configurer le compte de règlement (bancaire/mobile money) côté CinetPay.
+function launchCinetPaySubscription({ transactionId, amount, description, customer, onSuccess, onError }) {
+  if (!window.CinetPay) {
+    onError && onError("Le module de paiement n'a pas pu se charger (vérifie ta connexion internet).");
+    return;
+  }
+  const [firstName, ...rest] = (customer.name || "Zonako").trim().split(" ");
+  window.CinetPay.setConfig({
+    apikey: CINETPAY_CONFIG.apikey,
+    site_id: CINETPAY_CONFIG.site_id,
+    mode: CINETPAY_CONFIG.mode,
+    notify_url: CINETPAY_CONFIG.notify_url,
+  });
+  window.CinetPay.getCheckout({
+    transaction_id: transactionId,
+    amount,
+    currency: "XOF",
+    channels: "ALL",
+    description,
+    customer_name: firstName,
+    customer_surname: rest.join(" ") || firstName,
+    customer_phone_number: customer.phone,
+    customer_address: "Côte d'Ivoire",
+    customer_city: "Abidjan",
+    customer_country: "CI",
+    customer_state: "CI",
+    customer_zip_code: "00225",
+  });
+  window.CinetPay.waitResponse((data) => {
+    if (data.status === "ACCEPTED") {
+      onSuccess && onSuccess(transactionId);
+    } else {
+      onError && onError("Paiement refusé ou annulé.");
+    }
+  });
+  window.CinetPay.onError((data) => {
+    onError && onError("Une erreur est survenue pendant le paiement. Réessaie dans un instant.");
+    console.error("Erreur CinetPay (abonnement):", data);
+  });
+}
+
+// Filet de sécurité "essai + abonnement" : calcule si un vendeur/livreur a encore
+// accès (essai en cours OU abonnement actif et non expiré).
+function getAccessState(info, trialDays) {
+  const trialStartedAt = info.trialStartedAt || Date.now();
+  const daysUsed = Math.floor((Date.now() - trialStartedAt) / 86400000);
+  const daysLeft = Math.max(0, trialDays - daysUsed);
+  const subscriptionActive = info.subscriptionStatus === "active" && info.subscriptionExpiresAt && info.subscriptionExpiresAt > Date.now();
+  const trialActive = !subscriptionActive && daysLeft > 0;
+  return { subscriptionActive, trialActive, daysLeft, granted: subscriptionActive || trialActive };
+}
+
+// Écran de paywall + bandeau d'essai, partagé entre l'espace vendeur et l'espace livreur.
+function SubscriptionGate({ role, info, trialDays, accessFee, color, children }) {
+  const [paying, setPaying] = useState(false);
+  const [payError, setPayError] = useState("");
+  const [payNotice, setPayNotice] = useState("");
+  const { subscriptionActive, trialActive, daysLeft, granted } = getAccessState(info, trialDays);
+  const roleLabel = role === "vendor" ? "vendeur" : "livreur";
+
+  async function pay() {
+    setPayError("");
+    setPayNotice("");
+    setPaying(true);
+    try {
+      // On relie d'abord un transaction_id à cet abonnement, AVANT de lancer le
+      // paiement — c'est ce qui permettra au webhook /api/cinetpay/notify de
+      // savoir quoi activer une fois CinetPay confirmé le paiement.
+      const transactionId = `ZK-SUB-${role}-${info.phone}-${Date.now()}`;
+      await apiSend("/api/payments/pending", "POST", { transactionId, kind: "subscription", role, phone: info.phone, amount: accessFee });
+      launchCinetPaySubscription({
+        transactionId,
+        amount: accessFee,
+        description: `Abonnement Zonako ${roleLabel === "vendeur" ? "Vendeur" : "Livreur"} (30 jours)`,
+        customer: { name: info.name, phone: info.phone },
+        onSuccess: () => {
+          setPaying(false);
+          setPayNotice("Paiement reçu — vérification en cours, ton abonnement s'activera dans quelques instants.");
+        },
+        onError: (msg) => { setPaying(false); setPayError(msg); },
+      });
+    } catch (e) {
+      setPaying(false);
+      setPayError("Erreur pendant la préparation du paiement. Réessaie.");
+    }
+  }
+
+  if (!granted) {
+    return (
+      <div className="max-w-sm mx-auto px-4 py-10 text-center">
+        <div className="w-11 h-11 rounded-lg flex items-center justify-center mb-4 mx-auto" style={{ backgroundColor: color }}>
+          <Lock size={18} className="text-white" />
+        </div>
+        <h2 className="f-display font-semibold text-xl text-[#14213D] mb-1">
+          {info.subscriptionStatus === "active" ? "Abonnement expiré" : "Ton essai gratuit est terminé"}
+        </h2>
+        <p className="f-body text-sm text-[#14213D]/50 mb-5">
+          Pour continuer à utiliser l'espace {roleLabel}, active ton abonnement Zonako : {accessFee.toLocaleString("fr-FR")} F pour 30 jours.
+        </p>
+        {payError && <p className="f-body text-xs text-[#C1440E] mb-3">{payError}</p>}
+        {payNotice && <p className="f-body text-xs text-[#2D6A4F] mb-3">{payNotice}</p>}
+        <button
+          disabled={paying}
+          onClick={pay}
+          className="w-full text-white f-display font-semibold py-3 rounded-full text-sm disabled:opacity-40"
+          style={{ backgroundColor: color }}
+        >
+          {paying ? "Paiement en cours…" : `Payer ${accessFee.toLocaleString("fr-FR")} F et activer`}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {trialActive && (
+        <div className="max-w-5xl mx-auto px-4 pt-4">
+          <div className="f-mono text-xs bg-[#F2A93B]/15 text-[#14213D] px-3 py-2 rounded-lg flex items-center justify-between gap-2">
+            <span>🎁 Essai gratuit : encore {daysLeft} jour{daysLeft > 1 ? "s" : ""}</span>
+            <button onClick={pay} disabled={paying} className="f-mono underline whitespace-nowrap">{paying ? "…" : "Payer maintenant"}</button>
+          </div>
+          {payError && <p className="f-body text-xs text-[#C1440E] px-1 mt-1">{payError}</p>}
+          {payNotice && <p className="f-body text-xs text-[#2D6A4F] px-1 mt-1">{payNotice}</p>}
+        </div>
+      )}
+      {subscriptionActive && (
+        <div className="max-w-5xl mx-auto px-4 pt-4">
+          <p className="f-mono text-[10px] text-[#2D6A4F]">✓ Abonnement actif jusqu'au {new Date(info.subscriptionExpiresAt).toLocaleDateString("fr-FR")}</p>
+        </div>
+      )}
+      {children}
+    </>
+  );
+}
+
+function zoneLabel(z) {
+  return z === NATIONAL ? "🌍 National" : z;
+}
+
+// Sur mobile, le clavier virtuel peut recouvrir le bas de l'écran (et donc le bouton
+// "Entrer") pendant la saisie. On fait remonter le champ actif pour qu'il reste visible.
+function keepInView(e) {
+  const el = e.target;
+  setTimeout(() => el.scrollIntoView({ behavior: "smooth", block: "center" }), 300);
+}
+
+// Compresse une photo choisie par le vendeur (fichier local) en une image légère
+// encodée en base64, pour qu'elle puisse être stockée et rechargée instantanément.
+function compressImage(file, maxWidth = 480, quality = 0.6) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, maxWidth / img.width);
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width * scale;
+        canvas.height = img.height * scale;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = reject;
+      img.src = reader.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function StatusBadge({ status }) {
+  const map = {
+    nouvelle: { label: "Attente confirmation", bg: "#F2A93B", fg: "#14213D", icon: Clock },
+    confirmee: { label: "Confirmée", bg: "#3B6FA0", fg: "#FBF7F0", icon: Check },
+    en_livraison: { label: "En livraison", bg: "#14213D", fg: "#FBF7F0", icon: Truck },
+    en_transit: { label: "En transit (transport)", bg: "#14213D", fg: "#FBF7F0", icon: Truck },
+    livree: { label: "Livrée", bg: "#2D6A4F", fg: "#FBF7F0", icon: Check },
+    annulee: { label: "Annulée", bg: "#C1440E", fg: "#FBF7F0", icon: X },
+  };
+  const s = map[status] || map.nouvelle;
+  const Icon = s.icon;
+  return (
+    <span
+      className="f-mono inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-1 rounded-full"
+      style={{ backgroundColor: s.bg, color: s.fg }}
+    >
+      <Icon size={12} strokeWidth={2.5} />
+      {s.label}
+    </span>
+  );
+}
+
+function OrderTimeline({ status, shippingMethod = "livreur" }) {
+  const steps = shippingMethod === "transport"
+    ? [
+        { key: "nouvelle", label: "Confirmation" },
+        { key: "confirmee", label: "Prête" },
+        { key: "en_transit", label: "En transit" },
+        { key: "livree", label: "Récupérée" },
+      ]
+    : [
+        { key: "nouvelle", label: "Confirmation" },
+        { key: "confirmee", label: "Prête" },
+        { key: "en_livraison", label: "En route" },
+        { key: "livree", label: "Livrée" },
+      ];
+  if (status === "annulee") {
+    return <p className="f-mono text-xs text-[#C1440E] mt-2">Commande annulée par le vendeur.</p>;
+  }
+  const idx = steps.findIndex((s) => s.key === status);
+  return (
+    <div className="flex items-center mt-3">
+      {steps.map((s, i) => (
+        <div key={s.key} className="flex items-center flex-1 last:flex-none">
+          <div className="flex flex-col items-center">
+            <div className={`w-5 h-5 rounded-full flex items-center justify-center ${i <= idx ? "bg-[#2D6A4F]" : "bg-[#14213D]/10"}`}>
+              {i <= idx && <Check size={11} className="text-white" strokeWidth={3} />}
+            </div>
+            <span className="f-mono text-[9px] text-[#14213D]/40 mt-1 whitespace-nowrap">{s.label}</span>
+          </div>
+          {i < steps.length - 1 && <div className={`h-0.5 flex-1 mx-1 mb-4 ${i < idx ? "bg-[#2D6A4F]" : "bg-[#14213D]/10"}`} />}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ZonePicker({ value, onChange, label = "Zone", allowNational = false }) {
+  return (
+    <div>
+      <label className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 block mb-1.5">{label}</label>
+      <div className="relative">
+        <MapPin size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#C1440E]" />
+        <select
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="f-body w-full pl-9 pr-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-[#14213D] text-sm appearance-none focus:outline-none focus:border-[#F2A93B]"
+        >
+          <option value="">Choisir une zone…</option>
+          {allowNational && <option value={NATIONAL}>🌍 {NATIONAL}</option>}
+          {ZONES.map((z) => (
+            <option key={z} value={z}>{z}</option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
+}
+
+function TopBar({ role, setRole, cartCount, onCartClick }) {
+  return (
+    <div className="sticky top-0 z-30 bg-[#14213D] text-[#FBF7F0]">
+      <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
+        <button onClick={() => setRole("home")} className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-full bg-[#F2A93B] flex items-center justify-center f-display font-bold text-[#14213D] text-sm">Z</div>
+          <span className="f-display font-semibold text-lg tracking-tight">Zonako</span>
+        </button>
+        <div className="flex items-center gap-2">
+          {role === "buyer" && (
+            <button onClick={onCartClick} className="relative flex items-center gap-1.5 bg-[#F2A93B] text-[#14213D] px-3 py-1.5 rounded-full text-sm font-semibold f-body">
+              <ShoppingBag size={15} />
+              Panier
+              {cartCount > 0 && (
+                <span className="f-mono absolute -top-1.5 -right-1.5 bg-[#C1440E] text-white text-[10px] w-4.5 h-4.5 min-w-[18px] h-[18px] rounded-full flex items-center justify-center">
+                  {cartCount}
+                </span>
+              )}
+            </button>
+          )}
+          {role !== "home" && (
+            <button onClick={() => setRole("home")} className="text-xs f-mono text-[#FBF7F0]/70 hover:text-[#FBF7F0] flex items-center gap-1">
+              <ArrowLeft size={13} /> Changer de rôle
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Home({ setRole }) {
+  const roles = [
+    { key: "buyer", title: "Acheteur", desc: "Parcourir les produits de ta zone et commander", icon: ShoppingBag, color: "#F2A93B" },
+    { key: "vendor", title: "Vendeur", desc: "Publier tes produits et suivre tes commandes", icon: Store, color: "#2D6A4F" },
+    { key: "courier", title: "Livreur", desc: "Accepter des livraisons dans ta zone", icon: Bike, color: "#C1440E" },
+  ];
+  return (
+    <div className="max-w-5xl mx-auto px-4 py-10">
+      <div className="mb-10">
+        <p className="f-mono text-xs uppercase tracking-widest text-[#C1440E] mb-2">Marché local, par zone</p>
+        <h1 className="f-display text-3xl md:text-4xl font-semibold text-[#14213D] leading-tight">
+          Le commerce de ton quartier,<br />en ligne.
+        </h1>
+        <p className="f-body text-[#14213D]/60 mt-3 max-w-md">
+          Chaque produit est rattaché à une zone. Tu vois d'abord ce qui se vend et se livre près de chez toi.
+        </p>
+      </div>
+      <div className="grid sm:grid-cols-3 gap-4">
+        {roles.map((r) => {
+          const Icon = r.icon;
+          return (
+            <button
+              key={r.key}
+              onClick={() => setRole(r.key)}
+              className="ticket text-left bg-white border-2 border-[#14213D]/10 p-5 hover:border-[#14213D]/30 transition-colors group"
+            >
+              <div className="w-11 h-11 rounded-lg flex items-center justify-center mb-4" style={{ backgroundColor: r.color }}>
+                <Icon size={20} className="text-white" strokeWidth={2.2} />
+              </div>
+              <h3 className="f-display font-semibold text-[#14213D] text-lg">{r.title}</h3>
+              <p className="f-body text-sm text-[#14213D]/55 mt-1">{r.desc}</p>
+            </button>
+          );
+        })}
+      </div>
+      <button onClick={() => setRole("owner")} className="f-mono text-xs text-[#14213D]/30 hover:text-[#14213D]/60 mt-10 inline-block">
+        Espace propriétaire →
+      </button>
+    </div>
+  );
+}
+
+function savePhoneToken(phone, token) {
+  try { localStorage.setItem(`phone_token_${phone}`, token); } catch { /* échec silencieux */ }
+}
+function getPhoneToken(phone) {
+  try { return localStorage.getItem(`phone_token_${phone}`) || null; } catch { return null; }
+}
+
+// Inscription avec vérification du numéro par SMS (code à usage unique). Une fois
+// vérifié, le jeton reçu sert à prouver "j'agis bien en tant que ce numéro" pour
+// toutes les actions sensibles (publier un produit, commander, confirmer une
+// livraison...).
+function RegisterWithPhoneVerification({ title, subtitle, accentColor, onSubmit }) {
+  const [form, setForm] = useState({ name: "", phone: "" });
+  const [step, setStep] = useState("info"); // "info" | "code"
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [testMode, setTestMode] = useState(false);
+
+  async function sendCode() {
+    setError("");
+    setBusy(true);
+    try {
+      const r = await apiSend("/api/auth/send-code", "POST", { phone: form.phone });
+      setTestMode(!!r.testMode);
+      setStep("code");
+    } catch {
+      setError("Impossible d'envoyer le code. Vérifie le numéro.");
+    }
+    setBusy(false);
+  }
+
+  async function verify() {
+    setError("");
+    setBusy(true);
+    try {
+      const { token } = await apiSend("/api/auth/verify-code", "POST", { phone: form.phone, code });
+      savePhoneToken(form.phone, token);
+      onSubmit(form, token);
+    } catch {
+      setError("Code incorrect ou expiré.");
+    }
+    setBusy(false);
+  }
+
+  return (
+    <div className="max-w-sm mx-auto px-4 py-8">
+      <h2 className="f-display font-semibold text-xl text-[#14213D] mb-1">{title}</h2>
+      <p className="f-body text-sm text-[#14213D]/50 mb-5">{subtitle}</p>
+      {step === "info" ? (
+        <div className="space-y-3" onKeyDown={(e) => { if (e.key === "Enter" && form.name && form.phone) sendCode(); }}>
+          <input placeholder="Ton nom" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} onFocus={keepInView} className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-sm focus:outline-none" />
+          <input placeholder="Ton numéro de téléphone" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} onFocus={keepInView} className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-sm focus:outline-none" />
+          {error && <p className="f-body text-xs text-[#C1440E]">{error}</p>}
+          <button
+            disabled={!form.name || !form.phone || busy}
+            onClick={sendCode}
+            className="w-full disabled:opacity-30 text-[#14213D] f-display font-semibold py-3 rounded-full text-sm"
+            style={{ backgroundColor: accentColor }}
+          >
+            {busy ? "Envoi…" : "Recevoir mon code par SMS"}
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-3" onKeyDown={(e) => { if (e.key === "Enter" && code) verify(); }}>
+          <p className="f-body text-xs text-[#14213D]/50">
+            Code envoyé au {form.phone}.{testMode ? " (Mode test — pas de Twilio configuré : regarde les logs du serveur pour le code.)" : ""}
+          </p>
+          <input placeholder="Code reçu par SMS" value={code} onChange={(e) => setCode(e.target.value)} onFocus={keepInView} className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-sm focus:outline-none" />
+          {error && <p className="f-body text-xs text-[#C1440E]">{error}</p>}
+          <button disabled={!code || busy} onClick={verify} className="w-full disabled:opacity-30 text-[#14213D] f-display font-semibold py-3 rounded-full text-sm" style={{ backgroundColor: accentColor }}>
+            {busy ? "Vérification…" : "Vérifier et entrer"}
+          </button>
+          <button onClick={() => { setStep("info"); setCode(""); setError(""); }} className="w-full f-mono text-xs text-[#14213D]/40 underline">Changer de numéro</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Changer de numéro de téléphone (vendeur/livreur) : il faut vérifier le NOUVEAU
+// numéro par SMS avant que le changement soit accepté par le serveur — voir
+// POST /api/profiles/:role/change-phone.
+function ChangePhoneNumber({ role, info, accentColor, onChanged }) {
+  const [open, setOpen] = useState(false);
+  const [newPhone, setNewPhone] = useState("");
+  const [step, setStep] = useState("phone"); // "phone" | "code"
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [testMode, setTestMode] = useState(false);
+
+  async function sendCode() {
+    setError("");
+    setBusy(true);
+    try {
+      const r = await apiSend("/api/auth/send-code", "POST", { phone: newPhone });
+      setTestMode(!!r.testMode);
+      setStep("code");
+    } catch {
+      setError("Impossible d'envoyer le code. Vérifie le numéro.");
+    }
+    setBusy(false);
+  }
+
+  async function verifyAndChange() {
+    setError("");
+    setBusy(true);
+    try {
+      const { token: newToken } = await apiSend("/api/auth/verify-code", "POST", { phone: newPhone, code });
+      const profile = await apiSend(`/api/profiles/${role}/change-phone`, "POST", { newPhone, newToken, name: info.name }, getPhoneToken(info.phone));
+      savePhoneToken(newPhone, newToken);
+      setOpen(false);
+      setStep("phone");
+      setNewPhone("");
+      setCode("");
+      onChanged(profile);
+    } catch (e) {
+      setError(e.message && e.message.includes("déjà utilisé") ? "Ce numéro est déjà utilisé par un autre compte." : "Code incorrect, ou erreur pendant le changement.");
+    }
+    setBusy(false);
+  }
+
+  if (!open) {
+    return <button onClick={() => setOpen(true)} className="f-mono text-[10px] text-[#14213D]/35 hover:text-[#14213D] underline">changer de numéro</button>;
+  }
+
+  return (
+    <div className="ticket bg-white border-2 border-[#14213D]/10 p-3 mt-2 space-y-2">
+      <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60">Changer de numéro</p>
+      {step === "phone" ? (
+        <>
+          <input placeholder="Nouveau numéro de téléphone" value={newPhone} onChange={(e) => setNewPhone(e.target.value)} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm" />
+          {error && <p className="f-body text-xs text-[#C1440E]">{error}</p>}
+          <div className="flex gap-2">
+            <button disabled={!newPhone || busy} onClick={sendCode} className="flex-1 f-mono text-xs disabled:opacity-30 text-white py-2 rounded-full" style={{ backgroundColor: accentColor }}>
+              {busy ? "Envoi…" : "Envoyer un code SMS"}
+            </button>
+            <button onClick={() => setOpen(false)} className="flex-1 f-mono text-xs bg-[#14213D]/10 text-[#14213D] py-2 rounded-full">Annuler</button>
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="f-body text-xs text-[#14213D]/50">
+            Code envoyé au {newPhone}.{testMode ? " (Mode test : regarde les logs du serveur.)" : ""}
+          </p>
+          <input placeholder="Code reçu par SMS" value={code} onChange={(e) => setCode(e.target.value)} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm" />
+          {error && <p className="f-body text-xs text-[#C1440E]">{error}</p>}
+          <div className="flex gap-2">
+            <button disabled={!code || busy} onClick={verifyAndChange} className="flex-1 f-mono text-xs disabled:opacity-30 text-white py-2 rounded-full" style={{ backgroundColor: accentColor }}>
+              {busy ? "Vérification…" : "Vérifier et changer"}
+            </button>
+            <button onClick={() => { setOpen(false); setStep("phone"); setError(""); }} className="flex-1 f-mono text-xs bg-[#14213D]/10 text-[#14213D] py-2 rounded-full">Annuler</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, registerBuyer, logoutBuyer, placeOrder, cancelOrder, showCart, setShowCart, myOrders, chooseCourierForOrder, confirmDeliveryByBuyer }) {
+  const [category, setCategory] = useState("");
+  const [view, setView] = useState("browse"); // browse | orders
+
+  const [deliveryZone, setDeliveryZone] = useState("");
+  const [shippingMethod, setShippingMethod] = useState("livreur"); // "livreur" | "transport"
+  const [paymentMethod, setPaymentMethod] = useState("cinetpay"); // "cinetpay" | "cod"
+  const [payProcessing, setPayProcessing] = useState(false);
+  const [payError, setPayError] = useState("");
+  const [payNotice, setPayNotice] = useState("");
+
+  useEffect(() => {
+    if (zone && zone !== NATIONAL && !deliveryZone) setDeliveryZone(zone);
+  }, [zone]);
+
+  const filtered = products.filter((p) => {
+    const zoneMatch = !zone || zone === NATIONAL || p.zone === zone || p.zone === NATIONAL;
+    return zoneMatch && (!category || p.category === category);
+  });
+
+  if (!buyerInfo.registered) {
+    return (
+      <RegisterWithPhoneVerification
+        title="Espace acheteur"
+        subtitle="Entre tes infos pour commander et suivre tes livraisons."
+        accentColor="#F2A93B"
+        onSubmit={(form) => registerBuyer(form)}
+      />
+    );
+  }
+
+  function addToCart(p) {
+    setCart((c) => {
+      const existing = c.find((i) => i.id === p.id);
+      if (existing) return c.map((i) => (i.id === p.id ? { ...i, qty: i.qty + 1 } : i));
+      return [...c, { id: p.id, name: p.name, price: p.price, qty: 1, vendorName: p.vendorName, vendorPhone: p.vendorPhone, zone: p.zone, deliveryTime: p.deliveryTime }];
+    });
+  }
+  function changeQty(id, delta) {
+    setCart((c) => c.map((i) => (i.id === id ? { ...i, qty: Math.max(0, i.qty + delta) } : i)).filter((i) => i.qty > 0));
+  }
+  const goodsTotal = cart.reduce((s, i) => s + i.price * i.qty, 0);
+  // Les frais de livraison ne sont plus fixés par le vendeur : c'est le livreur qui
+  // propose son prix au moment d'accepter la commande, et l'acheteur le règle
+  // directement au livreur (en espèces) à la livraison — indépendamment du paiement
+  // des articles en ligne ou à la commande.
+  const total = goodsTotal;
+
+
+  // Lance le guichet de paiement CinetPay (mobile money, carte...). À la confirmation
+  // ("ACCEPTED"), on enregistre la commande comme payée. En cas de refus/annulation,
+  // on laisse l'acheteur réessayer ou basculer sur le paiement à la livraison.
+  async function launchCinetPayCheckout() {
+    setPayError("");
+    if (!window.CinetPay) {
+      setPayError("Le module de paiement n'a pas pu se charger (vérifie ta connexion internet) — réessaie, ou choisis « paiement à la livraison ».");
+      return;
+    }
+    setPayProcessing(true);
+    try {
+      // La commande est créée tout de suite, non payée — c'est /api/cinetpay/notify
+      // (vérifié auprès de CinetPay côté serveur) qui la marquera payée. Si le
+      // paiement échoue, on annule automatiquement cette commande.
+      const order = await placeOrder(total, 0, deliveryZone, { paymentMethod: "cinetpay" }, shippingMethod);
+      const transactionId = `ZK-${order.id}`;
+      await apiSend("/api/payments/pending", "POST", { transactionId, kind: "order", orderId: order.id, amount: total }, getPhoneToken(buyerInfo.phone));
+
+      const [firstName, ...rest] = (buyerInfo.name || "Client").trim().split(" ");
+      window.CinetPay.setConfig({
+        apikey: CINETPAY_CONFIG.apikey,
+        site_id: CINETPAY_CONFIG.site_id,
+        mode: CINETPAY_CONFIG.mode,
+        notify_url: CINETPAY_CONFIG.notify_url,
+      });
+      window.CinetPay.getCheckout({
+        transaction_id: transactionId,
+        amount: total,
+        currency: "XOF",
+        channels: "ALL",
+        description: `Commande Zonako · ${order.items.length} article${order.items.length > 1 ? "s" : ""}`,
+        customer_name: firstName,
+        customer_surname: rest.join(" ") || firstName,
+        customer_phone_number: buyerInfo.phone,
+        customer_address: deliveryZone || zone || "Côte d'Ivoire",
+        customer_city: (deliveryZone || zone || "Abidjan").split(" – ")[0],
+        customer_country: "CI",
+        customer_state: "CI",
+        customer_zip_code: "00225",
+      });
+      window.CinetPay.waitResponse((data) => {
+        setPayProcessing(false);
+        if (data.status === "ACCEPTED") {
+          setPayNotice("Paiement reçu — vérification en cours, ta commande passera « payée » dans quelques instants.");
+        } else {
+          cancelOrder(order.id, true);
+          setPayError("Paiement refusé ou annulé — la commande a été annulée. Tu peux réessayer, ou choisir « paiement à la livraison ».");
+        }
+      });
+      window.CinetPay.onError((data) => {
+        setPayProcessing(false);
+        cancelOrder(order.id, true);
+        setPayError("Une erreur est survenue pendant le paiement — la commande a été annulée. Réessaie dans un instant.");
+        console.error("Erreur CinetPay:", data);
+      });
+    } catch (e) {
+      setPayProcessing(false);
+      setPayError("Erreur pendant la préparation de la commande. Réessaie.");
+    }
+  }
+
+  function handleCheckout() {
+    if (paymentMethod === "cod") {
+      placeOrder(total, 0, deliveryZone, { paymentMethod: "cod" }, shippingMethod);
+    } else {
+      launchCinetPayCheckout();
+    }
+  }
+
+  return (
+    <div className="max-w-5xl mx-auto px-4 py-6">
+      <div className="flex items-center justify-between mb-5">
+        <div className="flex items-center gap-2">
+          <button onClick={() => setView("browse")} className={`f-mono text-xs px-3 py-1.5 rounded-full ${view === "browse" ? "bg-[#14213D] text-white" : "bg-[#14213D]/5 text-[#14213D]/60"}`}>Parcourir</button>
+          <button onClick={() => setView("orders")} className={`f-mono text-xs px-3 py-1.5 rounded-full ${view === "orders" ? "bg-[#14213D] text-white" : "bg-[#14213D]/5 text-[#14213D]/60"}`}>Mes commandes ({myOrders.length})</button>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="f-mono text-xs text-[#14213D]/40 hidden sm:inline">{buyerInfo.name}</span>
+          <button onClick={logoutBuyer} className="f-mono text-[11px] text-[#14213D]/40 hover:text-[#C1440E]">Changer de compte</button>
+        </div>
+      </div>
+
+      {view === "browse" && (
+        <>
+          <div className="grid sm:grid-cols-2 gap-3 mb-5 bg-white ticket border-2 border-[#14213D]/10 p-4">
+            <ZonePicker value={zone} onChange={setZone} allowNational />
+            <div>
+              <label className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 block mb-1.5">Catégorie</label>
+              <select value={category} onChange={(e) => setCategory(e.target.value)} className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-[#14213D] text-sm focus:outline-none focus:border-[#F2A93B]">
+                <option value="">Toutes</option>
+                {CATEGORIES.map((c) => <option key={c.name} value={c.name}>{c.emoji} {c.name}</option>)}
+              </select>
+            </div>
+          </div>
+
+          {!zone && (
+            <div className="text-center py-16 text-[#14213D]/40 f-body text-sm">Choisis une zone (ou « {NATIONAL} ») pour voir les produits disponibles.</div>
+          )}
+          {zone && filtered.length === 0 && (
+            <div className="text-center py-16 text-[#14213D]/40 f-body text-sm">Aucun produit pour l'instant {zone === NATIONAL ? "sur tout le territoire" : `dans « ${zone} »`}{category ? ` en ${category}` : ""}.</div>
+          )}
+
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {filtered.map((p) => {
+              const cat = CATEGORIES.find((c) => c.name === p.category);
+              return (
+                <div key={p.id} className="ticket bg-white border-2 border-[#14213D]/10 overflow-hidden flex flex-col">
+                  <div className="h-28 flex items-center justify-center text-4xl bg-[#FBF7F0] overflow-hidden">
+                    {p.imageUrl ? (
+                      <img src={p.imageUrl} alt={p.name} className="w-full h-full object-cover" onError={(e) => { e.target.style.display = "none"; e.target.parentElement.textContent = cat?.emoji || "📦"; }} />
+                    ) : (cat?.emoji || "📦")}
+                  </div>
+                  <div className="p-4 border-t-2 border-dashed border-[#14213D]/15 flex-1 flex flex-col">
+                    <div className="flex items-start justify-between gap-2">
+                      <h4 className="f-display font-semibold text-[#14213D] text-sm leading-snug">{p.name}</h4>
+                    </div>
+                    <p className="f-mono text-[10px] text-[#14213D]/40 mt-1">{p.vendorName} · {zoneLabel(p.zone)}</p>
+                    <div className="flex items-center gap-2 mt-2">
+                      <span className="f-mono text-[10px] text-[#14213D]/50 bg-[#14213D]/5 px-1.5 py-0.5 rounded">Stock: {p.stock ?? 0}</span>
+                      <span className="f-mono text-[10px] text-[#2D6A4F] bg-[#2D6A4F]/10 px-1.5 py-0.5 rounded">🚚 {p.deliveryTime || "Non précisé"}</span>
+                    </div>
+                    <p className="f-mono text-[10px] text-[#14213D]/40 mt-1">
+                      Frais de livraison fixés par le livreur à l'acceptation
+                    </p>
+                    <div className="flex items-center justify-between mt-3 pt-3 border-t border-[#14213D]/10">
+                      <span className="f-mono font-semibold text-[#C1440E]">{p.price.toLocaleString("fr-FR")} F</span>
+                      <button
+                        disabled={(p.stock ?? 0) <= 0}
+                        onClick={() => addToCart(p)}
+                        className="f-mono text-xs bg-[#14213D] disabled:opacity-30 text-white px-3 py-1.5 rounded-full hover:bg-[#F2A93B] hover:text-[#14213D] transition-colors"
+                      >
+                        {(p.stock ?? 0) <= 0 ? "Épuisé" : "Ajouter"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {view === "orders" && (
+        <div className="space-y-3">
+          {myOrders.length === 0 && <div className="text-center py-16 text-[#14213D]/40 f-body text-sm">Aucune commande pour l'instant.</div>}
+          {myOrders.map((o) => (
+            <div key={o.id} className="ticket bg-white border-2 border-[#14213D]/10 p-4">
+              <div className="flex items-center justify-between mb-2">
+                <span className="f-mono text-[11px] text-[#14213D]/50">#{o.id.slice(-6)} · {o.zone}</span>
+                <StatusBadge status={o.status} />
+              </div>
+              <ul className="f-body text-sm text-[#14213D]/70">
+                {o.items.map((it) => <li key={it.id}>{it.qty}× {it.name}</li>)}
+              </ul>
+              <div className="flex items-center justify-between mt-2">
+                <p className="f-mono text-sm font-semibold text-[#14213D]">{o.total.toLocaleString("fr-FR")} F</p>
+                <span className={`f-mono text-[10px] px-1.5 py-0.5 rounded ${o.paid ? "bg-[#2D6A4F]/10 text-[#2D6A4F]" : "bg-[#14213D]/5 text-[#14213D]/50"}`}>
+                  {o.paid ? "✓ Payé en ligne" : "À payer à la livraison"}
+                </span>
+              </div>
+              {o.shippingMethod === "transport" && (
+                <p className="f-mono text-[10px] text-[#14213D]/50 mt-1">
+                  🚌 {o.transportCompany ? `${o.transportCompany} · Suivi: ${o.trackingNumber || "en attente"}` : "En attente de prise en charge par le vendeur"}
+                </p>
+              )}
+              {o.shippingMethod === "livreur" && o.courierName && (
+                <div className="mt-1">
+                  <p className="f-mono text-[10px] text-[#14213D]/50">
+                    🏍️ {o.courierName} · Frais de livraison (à régler au livreur) : {(o.deliveryFee || 0).toLocaleString("fr-FR")} F
+                  </p>
+                  {o.status !== "livree" && !o.buyerConfirmed && (
+                    <button onClick={() => confirmDeliveryByBuyer(o.id)} className="w-full f-mono text-xs bg-[#2D6A4F] text-white py-1.5 rounded-full mt-1.5">
+                      J'ai reçu ma commande
+                    </button>
+                  )}
+                  {o.buyerConfirmed && (
+                    <p className="f-mono text-[10px] text-[#2D6A4F] mt-1">
+                      ✓ Toi : réception confirmée{o.courierConfirmed ? " · ✓ Livreur : livraison confirmée" : " — en attente que le livreur confirme"}
+                    </p>
+                  )}
+                </div>
+              )}
+              {o.shippingMethod === "livreur" && !o.courierName && (
+                <div className="mt-2 pt-2 border-t border-dashed border-[#14213D]/10">
+                  {(o.courierBids || []).length === 0 ? (
+                    <p className="f-mono text-[10px] text-[#14213D]/40">🏍️ En attente de propositions de prix des livreurs…</p>
+                  ) : (
+                    <>
+                      <p className="f-mono text-[10px] uppercase tracking-wide text-[#14213D]/40 mb-1.5">Propositions des livreurs — choisis la tienne</p>
+                      <div className="space-y-1.5">
+                        {[...o.courierBids].sort((a, b) => a.fee - b.fee).map((b, i) => (
+                          <div key={b.courierPhone} className="flex items-center justify-between bg-[#14213D]/5 rounded-lg px-2.5 py-1.5">
+                            <span className="f-body text-xs text-[#14213D]">
+                              {b.courierName} {i === 0 && <span className="f-mono text-[9px] bg-[#2D6A4F] text-white px-1.5 py-0.5 rounded-full ml-1">MEILLEUR PRIX</span>}
+                            </span>
+                            <div className="flex items-center gap-2">
+                              <span className="f-mono text-xs font-semibold text-[#14213D]">{b.fee.toLocaleString("fr-FR")} F</span>
+                              <button onClick={() => chooseCourierForOrder(o.id, b)} className="f-mono text-[10px] bg-[#C1440E] text-white px-2 py-1 rounded-full">Choisir</button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+              <OrderTimeline status={o.status} shippingMethod={o.shippingMethod} />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {showCart && (
+        <div className="fixed inset-0 z-40 flex justify-end">
+          <div className="absolute inset-0 bg-[#14213D]/40" onClick={() => setShowCart(false)} />
+          <div className="relative bg-[#FBF7F0] w-full max-w-sm h-full p-5 overflow-y-auto">
+            <div className="flex items-center justify-between mb-5">
+              <h3 className="f-display font-semibold text-lg text-[#14213D]">Ton panier</h3>
+              <button onClick={() => setShowCart(false)}><X size={20} className="text-[#14213D]/50" /></button>
+            </div>
+            {cart.length === 0 && <p className="f-body text-sm text-[#14213D]/40">Panier vide.</p>}
+            <div className="space-y-3">
+              {cart.map((i) => (
+                <div key={i.id} className="bg-white ticket border-2 border-[#14213D]/10 p-3 flex items-center justify-between">
+                  <div>
+                    <p className="f-body text-sm font-medium text-[#14213D]">{i.name}</p>
+                    <p className="f-mono text-xs text-[#14213D]/40">{i.price.toLocaleString("fr-FR")} F</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => changeQty(i.id, -1)} className="w-6 h-6 rounded-full bg-[#14213D]/10 f-mono text-sm">−</button>
+                    <span className="f-mono text-sm w-4 text-center">{i.qty}</span>
+                    <button onClick={() => changeQty(i.id, 1)} className="w-6 h-6 rounded-full bg-[#14213D]/10 f-mono text-sm">+</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {cart.length > 0 && (
+              <>
+                <div className="mt-5 pt-4 border-t-2 border-dashed border-[#14213D]/15 space-y-3">
+                  <p className="f-body text-xs text-[#14213D]/50">Commande au nom de <span className="font-semibold text-[#14213D]">{buyerInfo.name}</span> · {buyerInfo.phone}</p>
+                  <div>
+                    <label className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 block mb-1.5">Mode d'expédition</label>
+                    <div className="grid grid-cols-1 gap-2">
+                      <button
+                        onClick={() => setShippingMethod("livreur")}
+                        className={`f-mono text-xs px-3 py-2.5 rounded-lg border-2 text-left ${shippingMethod === "livreur" ? "border-[#F2A93B] bg-[#F2A93B]/10 text-[#14213D]" : "border-[#14213D]/15 text-[#14213D]/50"}`}
+                      >
+                        🏍️ Livraison locale par livreur — même zone/ville
+                      </button>
+                      <button
+                        onClick={() => setShippingMethod("transport")}
+                        className={`f-mono text-xs px-3 py-2.5 rounded-lg border-2 text-left ${shippingMethod === "transport" ? "border-[#F2A93B] bg-[#F2A93B]/10 text-[#14213D]" : "border-[#14213D]/15 text-[#14213D]/50"}`}
+                      >
+                        🚌 Expédition vers une autre ville — via compagnie de transport
+                      </button>
+                    </div>
+                    {shippingMethod === "transport" && (
+                      <p className="f-body text-[11px] text-[#14213D]/50 mt-1.5">Le vendeur confiera ton colis à une compagnie de transport et t'enverra le nom de la compagnie et le numéro de suivi. Tu récupères le colis à la gare/agence de la ville de destination.</p>
+                    )}
+                  </div>
+                  <ZonePicker value={deliveryZone} onChange={setDeliveryZone} label={shippingMethod === "transport" ? "Ville de destination" : "Zone de livraison (précise)"} />
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="f-body text-xs text-[#14213D]/50">Sous-total articles</span>
+                      <span className="f-mono text-xs text-[#14213D]/70">{goodsTotal.toLocaleString("fr-FR")} F</span>
+                    </div>
+                    <div className="flex items-center justify-between pt-1">
+                      <span className="f-body text-sm text-[#14213D]/60">Total (articles)</span>
+                      <span className="f-mono font-semibold text-lg text-[#14213D]">{total.toLocaleString("fr-FR")} F</span>
+                    </div>
+                    {shippingMethod === "livreur" && (
+                      <p className="f-body text-[11px] text-[#14213D]/40 pt-1">+ frais de livraison fixés par le livreur, à régler directement à lui à la livraison.</p>
+                    )}
+                  </div>
+                  <div>
+                    <label className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 block mb-1.5">Mode de paiement</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        onClick={() => { setPaymentMethod("cinetpay"); setPayError(""); }}
+                        className={`f-mono text-xs px-3 py-2.5 rounded-lg border-2 ${paymentMethod === "cinetpay" ? "border-[#F2A93B] bg-[#F2A93B]/10 text-[#14213D]" : "border-[#14213D]/15 text-[#14213D]/50"}`}
+                      >
+                        📱 Mobile Money / Carte
+                      </button>
+                      <button
+                        onClick={() => { setPaymentMethod("cod"); setPayError(""); }}
+                        className={`f-mono text-xs px-3 py-2.5 rounded-lg border-2 ${paymentMethod === "cod" ? "border-[#F2A93B] bg-[#F2A93B]/10 text-[#14213D]" : "border-[#14213D]/15 text-[#14213D]/50"}`}
+                      >
+                        💵 À la livraison
+                      </button>
+                    </div>
+                  </div>
+                  {payError && <p className="f-body text-xs text-[#C1440E]">{payError}</p>}
+                  {payNotice && <p className="f-body text-xs text-[#2D6A4F]">{payNotice}</p>}
+                  <button
+                    disabled={!deliveryZone || payProcessing}
+                    onClick={handleCheckout}
+                    className="w-full bg-[#C1440E] disabled:opacity-30 text-white f-display font-semibold py-3 rounded-full text-sm"
+                  >
+                    {payProcessing ? "Paiement en cours…" : paymentMethod === "cinetpay" ? `Payer ${total.toLocaleString("fr-FR")} F` : "Commander (paiement à la livraison)"}
+                  </button>
+                  {!deliveryZone && <p className="f-body text-xs text-[#C1440E]">Précise une zone de livraison exacte avant de commander (même si tu as parcouru en mode national).</p>}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addProduct, updateProduct, deleteProduct, orders, confirmOrder, cancelOrder, shipOrder, updateStatus, setRole, trialDays, accessFee, onPhoneChanged }) {
+  const [shipForm, setShipForm] = useState({}); // { [orderId]: { company, tracking } }
+  const [form, setForm] = useState({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrl: "", deliveryTime: "" });
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState({});
+  const [editingProfile, setEditingProfile] = useState(false);
+  const [profileForm, setProfileForm] = useState({ name: vendorInfo.name, phone: vendorInfo.phone });
+  const [publishing, setPublishing] = useState(false);
+  const [uploadingImg, setUploadingImg] = useState(false);
+  const [uploadingEditImg, setUploadingEditImg] = useState(false);
+  const myProducts = products.filter((p) => p.vendorPhone === vendorInfo.phone);
+  const myOrders = orders.filter((o) => o.items.some((it) => myProducts.some((p) => p.id === it.id)));
+
+  if (!vendorInfo.registered) {
+    return (
+      <RegisterWithPhoneVerification
+        title="Espace vendeur"
+        subtitle="Entre tes infos pour publier des produits."
+        accentColor="#2D6A4F"
+        onSubmit={(form) => registerVendor(form)}
+      />
+    );
+  }
+
+  function startEdit(p) {
+    setEditingId(p.id);
+    setEditForm({ price: p.price, stock: p.stock, deliveryTime: p.deliveryTime || "", imageUrl: p.imageUrl || "" });
+  }
+  function saveEdit(id) {
+    updateProduct(id, { price: Number(editForm.price), stock: Number(editForm.stock), deliveryTime: editForm.deliveryTime || "Non précisé", imageUrl: editForm.imageUrl || "" });
+    setEditingId(null);
+  }
+  async function handleImageUpload(file, target) {
+    if (!file) return;
+    if (target === "new") setUploadingImg(true); else setUploadingEditImg(true);
+    try {
+      const dataUrl = await compressImage(file);
+      if (target === "new") setForm((f) => ({ ...f, imageUrl: dataUrl }));
+      else setEditForm((f) => ({ ...f, imageUrl: dataUrl }));
+    } catch {
+      // photo illisible, on laisse le champ tel quel
+    }
+    if (target === "new") setUploadingImg(false); else setUploadingEditImg(false);
+  }
+  function saveProfile() {
+    registerVendor(profileForm);
+    setEditingProfile(false);
+  }
+
+  const totalRevenueNet = myOrders.reduce((s, o) => {
+    const myIds = myProducts.map((p) => p.id);
+    const sub = o.items.filter((it) => myIds.includes(it.id)).reduce((a, it) => a + it.price * it.qty, 0);
+    return s + sub * (1 - (o.feeRate ?? 0));
+  }, 0);
+
+  return (
+    <SubscriptionGate role="vendor" info={vendorInfo} trialDays={trialDays} accessFee={accessFee} color="#2D6A4F">
+    <div className="max-w-5xl mx-auto px-4 py-6">
+      <div className="flex items-center justify-between mb-1">
+        {editingProfile ? (
+          <div className="flex items-center gap-2 flex-1 max-w-sm" onKeyDown={(e) => { if (e.key === "Enter") saveProfile(); }}>
+            <input value={profileForm.name} onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })} className="f-body flex-1 px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-sm" placeholder="Nom" />
+            <button onClick={saveProfile} className="f-mono text-xs bg-[#2D6A4F] text-white px-3 py-1.5 rounded-full">OK</button>
+          </div>
+        ) : (
+          <h2 className="f-display font-semibold text-xl text-[#14213D] flex items-center gap-2">
+            Bonjour, {vendorInfo.name}
+            <button onClick={() => { setProfileForm({ name: vendorInfo.name, phone: vendorInfo.phone }); setEditingProfile(true); }} className="f-mono text-[10px] text-[#14213D]/35 hover:text-[#2D6A4F] underline font-normal">modifier le nom</button>
+          </h2>
+        )}
+        <div className="flex items-center gap-3">
+          <button onClick={() => setRole("owner")} className="f-mono text-[11px] text-[#14213D]/30 hover:text-[#14213D]/60 flex items-center gap-1">
+            <TrendingUp size={12} /> Espace propriétaire
+          </button>
+          <button onClick={logoutVendor} className="f-mono text-[11px] text-[#14213D]/40 hover:text-[#C1440E]">Changer de compte</button>
+        </div>
+      </div>
+      <div className="mb-6 flex items-center gap-2">
+        <p className="f-mono text-[11px] text-[#14213D]/40">{vendorInfo.phone}</p>
+        <ChangePhoneNumber role="vendor" info={vendorInfo} accentColor="#2D6A4F" onChanged={onPhoneChanged} />
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 mb-6">
+        <div className="ticket bg-white border-2 border-[#14213D]/10 p-3 text-center">
+          <p className="f-display font-semibold text-lg text-[#14213D]">{myProducts.length}</p>
+          <p className="f-mono text-[10px] uppercase text-[#14213D]/40">Produits</p>
+        </div>
+        <div className="ticket bg-white border-2 border-[#14213D]/10 p-3 text-center">
+          <p className="f-display font-semibold text-lg text-[#14213D]">{myOrders.length}</p>
+          <p className="f-mono text-[10px] uppercase text-[#14213D]/40">Commandes</p>
+        </div>
+        <div className="ticket bg-white border-2 border-[#14213D]/10 p-3 text-center">
+          <p className="f-display font-semibold text-lg text-[#2D6A4F]">{Math.round(totalRevenueNet).toLocaleString("fr-FR")} F</p>
+          <p className="f-mono text-[10px] uppercase text-[#14213D]/40">Net cumulé</p>
+        </div>
+      </div>
+
+      <div className="grid lg:grid-cols-[320px_1fr] gap-6">
+        <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 h-fit">
+          <h3 className="f-display font-semibold text-sm text-[#14213D] mb-3 flex items-center gap-1.5"><Plus size={15} /> Nouveau produit</h3>
+          <div className="space-y-2.5">
+            <input placeholder="Nom du produit" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#2D6A4F]" />
+
+            <div>
+              <label className="f-mono text-[10px] uppercase text-[#14213D]/40 block mb-1">Photo du produit</label>
+              <div className="flex items-center gap-2">
+                {form.imageUrl && <img src={form.imageUrl} alt="" className="w-11 h-11 rounded-lg object-cover border-2 border-[#14213D]/10" />}
+                <label className="flex-1 f-mono text-xs text-center bg-[#14213D]/5 hover:bg-[#14213D]/10 text-[#14213D]/60 py-2 rounded-lg cursor-pointer">
+                  {uploadingImg ? "Compression…" : form.imageUrl ? "Changer la photo" : "Choisir une photo"}
+                  <input type="file" accept="image/*" className="hidden" onChange={(e) => handleImageUpload(e.target.files[0], "new")} />
+                </label>
+                {form.imageUrl && <button onClick={() => setForm({ ...form, imageUrl: "" })}><X size={16} className="text-[#C1440E]/60" /></button>}
+              </div>
+              <p className="f-body text-[10px] text-[#14213D]/35 mt-1">Prise depuis ton téléphone ou ton ordinateur — compressée automatiquement.</p>
+            </div>
+
+            <input placeholder="Prix (FCFA)" type="number" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#2D6A4F]" />
+            <input placeholder="Stock disponible" type="number" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#2D6A4F]" />
+            <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm">
+              {CATEGORIES.map((c) => <option key={c.name} value={c.name}>{c.emoji} {c.name}</option>)}
+            </select>
+            <select value={form.zone} onChange={(e) => setForm({ ...form, zone: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm">
+              <option value="">Zone de vente…</option>
+              <option value={NATIONAL}>🌍 {NATIONAL}</option>
+              {ZONES.map((z) => <option key={z} value={z}>{z}</option>)}
+            </select>
+            <p className="f-body text-[10px] text-[#14213D]/35 -mt-1">Choisis une zone précise pour vendre localement, ou « {NATIONAL} » pour être visible partout.</p>
+            <input placeholder="Délai de préparation (ex: 24h)" value={form.deliveryTime} onChange={(e) => setForm({ ...form, deliveryTime: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#2D6A4F]" />
+            <p className="f-body text-[11px] text-[#14213D]/40">Les frais de livraison ne sont plus fixés ici : c'est le livreur qui propose son prix quand il accepte la commande.</p>
+            <button
+              disabled={!form.name || !form.price || !form.zone || publishing}
+              onClick={async () => {
+                setPublishing(true);
+                await addProduct({ ...form, price: Number(form.price), stock: Number(form.stock) || 0, deliveryTime: form.deliveryTime || "Non précisé", vendorName: vendorInfo.name, vendorPhone: vendorInfo.phone });
+                setForm({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrl: "", deliveryTime: "" });
+                setPublishing(false);
+              }}
+              className="w-full bg-[#2D6A4F] disabled:opacity-30 text-white f-display font-semibold py-2.5 rounded-full text-sm mt-1"
+            >
+              {publishing ? "Publication…" : "Publier"}
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <h3 className="f-display font-semibold text-sm text-[#14213D] mb-3">Mes produits ({myProducts.length})</h3>
+          <div className="grid sm:grid-cols-2 gap-3 mb-6">
+            {myProducts.map((p) => (
+              <div key={p.id} className="ticket bg-white border-2 border-[#14213D]/10 p-3">
+                {editingId === p.id ? (
+                  <div className="space-y-2">
+                    <p className="f-body text-sm font-medium text-[#14213D]">{p.name}</p>
+                    <div className="flex items-center gap-2">
+                      {editForm.imageUrl && <img src={editForm.imageUrl} alt="" className="w-9 h-9 rounded-lg object-cover border-2 border-[#14213D]/10" />}
+                      <label className="flex-1 f-mono text-[10px] text-center bg-[#14213D]/5 hover:bg-[#14213D]/10 text-[#14213D]/60 py-1.5 rounded-lg cursor-pointer">
+                        {uploadingEditImg ? "Compression…" : "Changer la photo"}
+                        <input type="file" accept="image/*" className="hidden" onChange={(e) => handleImageUpload(e.target.files[0], "edit")} />
+                      </label>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <input type="number" placeholder="Prix" value={editForm.price} onChange={(e) => setEditForm({ ...editForm, price: e.target.value })} className="f-mono w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
+                      <input type="number" placeholder="Stock" value={editForm.stock} onChange={(e) => setEditForm({ ...editForm, stock: e.target.value })} className="f-mono w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
+                      <input placeholder="Délai" value={editForm.deliveryTime} onChange={(e) => setEditForm({ ...editForm, deliveryTime: e.target.value })} className="f-mono w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
+                    </div>
+                    <div className="flex gap-2">
+                      <button onClick={() => saveEdit(p.id)} className="flex-1 f-mono text-xs bg-[#2D6A4F] text-white py-1.5 rounded-full">Enregistrer</button>
+                      <button onClick={() => setEditingId(null)} className="flex-1 f-mono text-xs bg-[#14213D]/10 text-[#14213D] py-1.5 rounded-full">Annuler</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      {p.imageUrl && <img src={p.imageUrl} alt="" className="w-10 h-10 rounded-lg object-cover border-2 border-[#14213D]/10" />}
+                      <div>
+                        <p className="f-body text-sm font-medium text-[#14213D]">{p.name}</p>
+                        <p className="f-mono text-xs text-[#14213D]/40">{p.price.toLocaleString("fr-FR")} F · stock {p.stock} · {zoneLabel(p.zone)}</p>
+                        <p className="f-mono text-[10px] text-[#2D6A4F]">🚚 {p.deliveryTime || "Non précisé"} · frais fixés par le livreur</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => startEdit(p)} className="f-mono text-[10px] text-[#14213D]/50 hover:text-[#2D6A4F] underline">Modifier</button>
+                      <button onClick={() => deleteProduct(p.id)}><Trash2 size={15} className="text-[#C1440E]/60 hover:text-[#C1440E]" /></button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+            {myProducts.length === 0 && <p className="f-body text-sm text-[#14213D]/40">Aucun produit publié.</p>}
+          </div>
+
+          <h3 className="f-display font-semibold text-sm text-[#14213D] mb-3">Commandes reçues ({myOrders.length})</h3>
+          <div className="space-y-2">
+            {myOrders.map((o) => {
+              const myProductIds = myProducts.map((p) => p.id);
+              const mySubtotal = o.items.filter((it) => myProductIds.includes(it.id)).reduce((s, it) => s + it.price * it.qty, 0);
+              const rate = o.feeRate ?? 0;
+              const net = Math.round(mySubtotal * (1 - rate));
+              return (
+                <div key={o.id} className="ticket bg-white border-2 border-[#14213D]/10 p-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="f-body text-sm text-[#14213D]">{o.buyerName} · {o.zone}</p>
+                      <p className="f-mono text-xs text-[#14213D]/40">#{o.id.slice(-6)} · {mySubtotal.toLocaleString("fr-FR")} F brut</p>
+                      <p className="f-mono text-xs text-[#2D6A4F] font-semibold">Net à recevoir : {net.toLocaleString("fr-FR")} F <span className="text-[#14213D]/30 font-normal">(après {Math.round(rate * 100)}% de commission)</span></p>
+                      <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                        <span className={`f-mono text-[10px] px-1.5 py-0.5 rounded inline-block ${o.paid ? "bg-[#2D6A4F]/10 text-[#2D6A4F]" : "bg-[#14213D]/5 text-[#14213D]/50"}`}>
+                          {o.paid ? "✓ Payé en ligne" : "Paiement à la livraison"}
+                        </span>
+                        {o.shippingMethod === "transport" && (
+                          <span className="f-mono text-[10px] px-1.5 py-0.5 rounded inline-block bg-[#3B6FA0]/10 text-[#3B6FA0]">🚌 Expédition transport → {o.zone}</span>
+                        )}
+                        {o.shippingMethod === "livreur" && (
+                          <span className="f-mono text-[10px] px-1.5 py-0.5 rounded inline-block bg-[#C1440E]/10 text-[#C1440E]">
+                            🏍️ {o.courierName ? `${o.courierName} · ${(o.deliveryFee || 0).toLocaleString("fr-FR")} F` : (o.courierBids || []).length > 0 ? `${o.courierBids.length} proposition(s) en attente du choix du client` : "En attente de livreurs"}
+                          </span>
+                        )}
+                        {o.shippingMethod === "livreur" && o.courierName && (
+                          <>
+                            <span className={`f-mono text-[10px] px-1.5 py-0.5 rounded inline-block ${o.courierConfirmed ? "bg-[#2D6A4F]/10 text-[#2D6A4F]" : "bg-[#14213D]/5 text-[#14213D]/40"}`}>
+                              {o.courierConfirmed ? "✓ Colis remis par le livreur" : "En attente de remise par le livreur"}
+                            </span>
+                            <span className={`f-mono text-[10px] px-1.5 py-0.5 rounded inline-block ${o.buyerConfirmed ? "bg-[#2D6A4F]/10 text-[#2D6A4F]" : "bg-[#14213D]/5 text-[#14213D]/40"}`}>
+                              {o.buyerConfirmed ? "✓ Réception confirmée par le client" : "En attente de confirmation du client"}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                    <StatusBadge status={o.status} />
+                  </div>
+                  {o.status === "nouvelle" && (
+                    <div className="flex gap-2 mt-3 pt-3 border-t border-dashed border-[#14213D]/10">
+                      <button onClick={() => confirmOrder(o.id)} className="flex-1 f-mono text-xs bg-[#2D6A4F] text-white py-1.5 rounded-full">Confirmer la commande</button>
+                      <button onClick={() => cancelOrder(o.id)} className="flex-1 f-mono text-xs bg-[#C1440E]/10 text-[#C1440E] py-1.5 rounded-full">Annuler</button>
+                    </div>
+                  )}
+                  {o.status === "confirmee" && o.shippingMethod === "transport" && (
+                    <div className="mt-3 pt-3 border-t border-dashed border-[#14213D]/10 space-y-2">
+                      <p className="f-body text-[11px] text-[#14213D]/50">Remets le colis à une compagnie de transport vers {o.zone}, puis renseigne les infos pour que {o.buyerName} puisse suivre et récupérer sa commande.</p>
+                      <input
+                        placeholder="Compagnie de transport (ex : UTB, Express Union...)"
+                        value={shipForm[o.id]?.company || ""}
+                        onChange={(e) => setShipForm({ ...shipForm, [o.id]: { ...shipForm[o.id], company: e.target.value } })}
+                        className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-xs focus:outline-none focus:border-[#3B6FA0]"
+                      />
+                      <input
+                        placeholder="Numéro de suivi / bordereau"
+                        value={shipForm[o.id]?.tracking || ""}
+                        onChange={(e) => setShipForm({ ...shipForm, [o.id]: { ...shipForm[o.id], tracking: e.target.value } })}
+                        className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-xs focus:outline-none focus:border-[#3B6FA0]"
+                      />
+                      <button
+                        disabled={!shipForm[o.id]?.company}
+                        onClick={() => shipOrder(o.id, shipForm[o.id].company, shipForm[o.id]?.tracking || "")}
+                        className="w-full f-mono text-xs bg-[#3B6FA0] disabled:opacity-30 text-white py-1.5 rounded-full"
+                      >
+                        Marquer expédiée (transport)
+                      </button>
+                    </div>
+                  )}
+                  {o.status === "en_transit" && o.shippingMethod === "transport" && (
+                    <div className="mt-3 pt-3 border-t border-dashed border-[#14213D]/10 space-y-1.5">
+                      <p className="f-mono text-[11px] text-[#3B6FA0]">🚌 {o.transportCompany} · Suivi : {o.trackingNumber || "—"}</p>
+                      <button onClick={() => updateStatus(o.id, "livree")} className="w-full f-mono text-xs bg-[#2D6A4F] text-white py-1.5 rounded-full">Marquer récupérée par le client</button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {myOrders.length === 0 && <p className="f-body text-sm text-[#14213D]/40">Aucune commande pour l'instant.</p>}
+          </div>
+        </div>
+      </div>
+    </div>
+    </SubscriptionGate>
+  );
+}
+
+function CourierView({ courierInfo, registerCourier, logoutCourier, orders, submitCourierBid, updateStatus, confirmDeliveryByCourier, trialDays, accessFee, onPhoneChanged }) {
+  const [zone, setZone] = useState("");
+  const [feeInputs, setFeeInputs] = useState({}); // { [orderId]: proposedFee }
+  const available = orders.filter((o) => !o.courierPhone && o.status !== "annulee" && o.status !== "livree" && o.shippingMethod !== "transport" && (!zone || o.zone === zone));
+  const mine = orders.filter((o) => o.courierPhone === courierInfo.phone && o.status !== "livree" && o.status !== "annulee");
+  const delivered = orders.filter((o) => o.courierPhone === courierInfo.phone && o.status === "livree");
+
+  if (!courierInfo.registered) {
+    return (
+      <RegisterWithPhoneVerification
+        title="Espace livreur"
+        subtitle="Entre tes infos pour voir les livraisons disponibles."
+        accentColor="#C1440E"
+        onSubmit={(form) => registerCourier(form)}
+      />
+    );
+  }
+
+  return (
+    <SubscriptionGate role="courier" info={courierInfo} trialDays={trialDays} accessFee={accessFee} color="#C1440E">
+    <div className="max-w-5xl mx-auto px-4 py-6">
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="f-display font-semibold text-xl text-[#14213D]">Bonjour, {courierInfo.name}</h2>
+        <button onClick={logoutCourier} className="f-mono text-[11px] text-[#14213D]/40 hover:text-[#C1440E]">Changer de compte</button>
+      </div>
+      <div className="mb-5 flex items-center gap-2">
+        <p className="f-mono text-[11px] text-[#14213D]/40">{courierInfo.phone}</p>
+        <ChangePhoneNumber role="courier" info={courierInfo} accentColor="#C1440E" onChanged={onPhoneChanged} />
+      </div>
+
+      {mine.length > 0 && (
+        <>
+          <h3 className="f-display font-semibold text-sm text-[#14213D] mb-3">Mes livraisons en cours</h3>
+          <div className="space-y-2 mb-6">
+            {mine.map((o) => (
+              <div key={o.id} className="ticket bg-white border-2 border-[#14213D]/10 p-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="f-body text-sm text-[#14213D]">{o.zone} · {o.total.toLocaleString("fr-FR")} F (articles)</p>
+                    <p className="f-mono text-xs text-[#14213D]/40">#{o.id.slice(-6)} · {o.items.length} article(s)</p>
+                    <p className="f-mono text-xs text-[#2D6A4F] font-semibold">Tes frais de livraison : {(o.deliveryFee || 0).toLocaleString("fr-FR")} F</p>
+                  </div>
+                  {!o.courierConfirmed && (
+                    <button onClick={() => confirmDeliveryByCourier(o.id)} className="f-mono text-xs bg-[#2D6A4F] text-white px-3 py-1.5 rounded-full whitespace-nowrap">Marquer livrée</button>
+                  )}
+                </div>
+                {o.courierConfirmed && (
+                  <p className="f-mono text-[10px] text-[#2D6A4F] mt-2 pt-2 border-t border-dashed border-[#14213D]/10">
+                    ✓ Toi : livraison confirmée{o.buyerConfirmed ? " · ✓ Client : réception confirmée" : " — en attente que le client confirme la réception"}
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="f-display font-semibold text-sm text-[#14213D]">Livraisons disponibles ({available.length})</h3>
+        <select value={zone} onChange={(e) => setZone(e.target.value)} className="f-mono text-xs px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15">
+          <option value="">🌍 Toutes les zones (national)</option>
+          {ZONES.map((z) => <option key={z} value={z}>{z}</option>)}
+        </select>
+      </div>
+      <div className="space-y-2 mb-6">
+        {available.map((o) => {
+          const myBid = (o.courierBids || []).find((b) => b.courierPhone === courierInfo.phone);
+          const otherBidsCount = (o.courierBids || []).length - (myBid ? 1 : 0);
+          const isNew = Date.now() - o.createdAt < 2 * 60 * 1000;
+          return (
+            <div key={o.id} className="ticket bg-white border-2 border-[#14213D]/10 p-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="f-body text-sm text-[#14213D] flex items-center gap-1.5">
+                    {o.zone} · {o.total.toLocaleString("fr-FR")} F (articles)
+                    {isNew && <span className="f-mono text-[9px] bg-[#C1440E] text-white px-1.5 py-0.5 rounded-full">NOUVEAU</span>}
+                  </p>
+                  <p className="f-mono text-xs text-[#14213D]/40">#{o.id.slice(-6)} · {o.items.length} article(s)</p>
+                  {otherBidsCount > 0 && <p className="f-mono text-[10px] text-[#14213D]/40">{otherBidsCount} autre{otherBidsCount > 1 ? "s" : ""} livreur{otherBidsCount > 1 ? "s ont" : " a"} déjà proposé un prix</p>}
+                </div>
+              </div>
+              <div className="flex items-center gap-2 mt-2 pt-2 border-t border-dashed border-[#14213D]/10">
+                <input
+                  type="number"
+                  placeholder="Tes frais (FCFA)"
+                  value={feeInputs[o.id] ?? (myBid ? myBid.fee : "")}
+                  onChange={(e) => setFeeInputs({ ...feeInputs, [o.id]: e.target.value })}
+                  className="f-mono flex-1 px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs focus:outline-none focus:border-[#C1440E]"
+                />
+                <button
+                  disabled={!(feeInputs[o.id] ?? myBid?.fee)}
+                  onClick={() => submitCourierBid(o.id, courierInfo, feeInputs[o.id] ?? myBid.fee)}
+                  className="f-mono text-xs bg-[#14213D] disabled:opacity-30 text-white px-3 py-1.5 rounded-full whitespace-nowrap"
+                >
+                  {myBid ? "Mettre à jour ton prix" : "Proposer ce prix"}
+                </button>
+              </div>
+              {myBid && <p className="f-mono text-[10px] text-[#2D6A4F] mt-1">Ta proposition actuelle : {myBid.fee.toLocaleString("fr-FR")} F — en attente du choix de l'acheteur</p>}
+            </div>
+          );
+        })}
+        {available.length === 0 && <p className="f-body text-sm text-[#14213D]/40">Aucune livraison disponible pour l'instant.</p>}
+      </div>
+
+      {delivered.length > 0 && (
+        <>
+          <h3 className="f-display font-semibold text-sm text-[#14213D] mb-3">Historique ({delivered.length})</h3>
+          <div className="space-y-2 opacity-60">
+            {delivered.map((o) => (
+              <div key={o.id} className="ticket bg-white border-2 border-[#14213D]/10 p-3 flex items-center justify-between">
+                <p className="f-body text-sm text-[#14213D]">{o.zone} · {o.total.toLocaleString("fr-FR")} F</p>
+                <StatusBadge status={o.status} />
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+    </SubscriptionGate>
+  );
+}
+
+function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updateAccessSettings, ownerPayoutInfo, updateOwnerPayoutInfo, ownerToken, setOwnerToken }) {
+  const [code, setCode] = useState("");
+  const [rateInput, setRateInput] = useState(String(Math.round(feeRate * 100)));
+  const [accessFeeInput, setAccessFeeInput] = useState(String(accessFee));
+  const [trialDaysInput, setTrialDaysInput] = useState(String(trialDays));
+  const [payoutInput, setPayoutInput] = useState(ownerPayoutInfo || "");
+  const [error, setError] = useState("");
+  const [loggingIn, setLoggingIn] = useState(false);
+
+  async function login() {
+    setError("");
+    setLoggingIn(true);
+    try {
+      const { token } = await apiSend("/api/owner/login", "POST", { code });
+      setOwnerToken(token);
+    } catch (e) {
+      setError("Code incorrect.");
+    }
+    setLoggingIn(false);
+  }
+
+  // Le code d'accès vit uniquement dans la variable d'environnement OWNER_PASSCODE
+  // du serveur — jamais dans ce fichier ni dans le navigateur. C'est le serveur qui
+  // vérifie le code et délivre un jeton temporaire (12h) pour les actions protégées.
+  if (!ownerToken) {
+    return (
+      <div className="max-w-sm mx-auto px-4 py-8">
+        <div className="w-11 h-11 rounded-lg bg-[#14213D] flex items-center justify-center mb-4">
+          <Lock size={18} className="text-[#F2A93B]" />
+        </div>
+        <h2 className="f-display font-semibold text-xl text-[#14213D] mb-1">Espace propriétaire</h2>
+        <p className="f-body text-sm text-[#14213D]/50 mb-5">Accès réservé — entre ton code.</p>
+        <div className="space-y-3" onKeyDown={(e) => { if (e.key === "Enter") login(); }}>
+          <input
+            type="password"
+            placeholder="Code d'accès"
+            value={code}
+            onChange={(e) => { setCode(e.target.value); setError(""); }}
+            onFocus={keepInView}
+            className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-sm focus:outline-none focus:border-[#14213D]"
+          />
+          {error && <p className="f-body text-xs text-[#C1440E]">{error}</p>}
+          <button
+            disabled={loggingIn}
+            onClick={login}
+            className="w-full bg-[#14213D] disabled:opacity-40 text-white f-display font-semibold py-3 rounded-full text-sm"
+          >
+            {loggingIn ? "Connexion…" : "Entrer"}
+          </button>
+          <p className="f-body text-[11px] text-[#14213D]/35">Ce code est réglé côté serveur (variable d'environnement OWNER_PASSCODE) — vois le README pour le définir ou le changer.</p>
+        </div>
+      </div>
+    );
+  }
+
+  const activeOrders = orders.filter((o) => o.status !== "annulee");
+  const gmv = activeOrders.reduce((s, o) => s + o.total, 0);
+  const totalCommission = activeOrders.reduce((s, o) => s + (o.commission ?? o.total * (o.feeRate ?? feeRate)), 0);
+  const paidOrders = orders.filter((o) => o.status === "livree");
+  const commissionCollected = paidOrders.reduce((s, o) => s + (o.commission ?? o.total * (o.feeRate ?? feeRate)), 0);
+
+  return (
+    <div className="max-w-3xl mx-auto px-4 py-6">
+      <h2 className="f-display font-semibold text-xl text-[#14213D] mb-5 flex items-center gap-2">
+        <TrendingUp size={20} className="text-[#C1440E]" /> Tableau de bord — revenus
+      </h2>
+
+      <div className="grid sm:grid-cols-3 gap-3 mb-6">
+        <div className="ticket bg-white border-2 border-[#14213D]/10 p-4">
+          <p className="f-mono text-[10px] uppercase tracking-wide text-[#14213D]/40 mb-1">Volume total (GMV)</p>
+          <p className="f-display font-semibold text-xl text-[#14213D]">{gmv.toLocaleString("fr-FR")} F</p>
+        </div>
+        <div className="ticket bg-white border-2 border-[#14213D]/10 p-4">
+          <p className="f-mono text-[10px] uppercase tracking-wide text-[#14213D]/40 mb-1">Commission générée</p>
+          <p className="f-display font-semibold text-xl text-[#C1440E]">{Math.round(totalCommission).toLocaleString("fr-FR")} F</p>
+        </div>
+        <div className="ticket bg-white border-2 border-[#14213D]/10 p-4">
+          <p className="f-mono text-[10px] uppercase tracking-wide text-[#14213D]/40 mb-1">Commission encaissée (livrées)</p>
+          <p className="f-display font-semibold text-xl text-[#2D6A4F]">{Math.round(commissionCollected).toLocaleString("fr-FR")} F</p>
+        </div>
+      </div>
+
+      <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
+        <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-2">Taux de commission (prélevé sur chaque vente vendeur)</p>
+        <div className="flex items-center gap-2">
+          <input
+            type="number" min="0" max="50" value={rateInput}
+            onChange={(e) => setRateInput(e.target.value)}
+            className="f-mono w-20 px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm"
+          />
+          <span className="f-body text-sm text-[#14213D]/60">%</span>
+          <button
+            onClick={() => updateFeeRate(Number(rateInput) / 100)}
+            className="f-mono text-xs bg-[#14213D] text-white px-3 py-2 rounded-full ml-2"
+          >
+            Mettre à jour
+          </button>
+        </div>
+        <p className="f-body text-xs text-[#14213D]/40 mt-2">
+          Taux actuel appliqué aux nouvelles commandes : <span className="font-semibold text-[#14213D]/70">{Math.round(feeRate * 100)}%</span>. Les commandes déjà passées gardent le taux au moment de l'achat.
+        </p>
+      </div>
+
+      <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
+        <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-2">Abonnement vendeur / livreur</p>
+        <div className="grid grid-cols-2 gap-2 mb-2">
+          <div>
+            <label className="f-body text-[10px] text-[#14213D]/40 block mb-1">Prix (FCFA / 30 jours)</label>
+            <input type="number" value={accessFeeInput} onChange={(e) => setAccessFeeInput(e.target.value)} className="f-mono w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm" />
+          </div>
+          <div>
+            <label className="f-body text-[10px] text-[#14213D]/40 block mb-1">Essai gratuit (jours)</label>
+            <input type="number" value={trialDaysInput} onChange={(e) => setTrialDaysInput(e.target.value)} className="f-mono w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm" />
+          </div>
+        </div>
+        <button
+          onClick={() => updateAccessSettings(accessFeeInput, trialDaysInput)}
+          className="f-mono text-xs bg-[#14213D] text-white px-3 py-2 rounded-full"
+        >
+          Mettre à jour
+        </button>
+        <p className="f-body text-xs text-[#14213D]/40 mt-2">
+          Actuellement : <span className="font-semibold text-[#14213D]/70">{accessFee.toLocaleString("fr-FR")} F</span> pour 30 jours, avec <span className="font-semibold text-[#14213D]/70">{trialDays} jour{trialDays > 1 ? "s" : ""}</span> d'essai gratuit. S'applique aux espaces vendeur et livreur — payé via CinetPay.
+        </p>
+      </div>
+
+      <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
+        <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-2">Coordonnées de règlement (référence)</p>
+        <input
+          placeholder="Ex : Mobile Money 07 69 57 48 99, ou IBAN/RIB bancaire"
+          value={payoutInput}
+          onChange={(e) => setPayoutInput(e.target.value)}
+          className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm mb-2"
+        />
+        <button onClick={() => updateOwnerPayoutInfo(payoutInput)} className="f-mono text-xs bg-[#14213D] text-white px-3 py-2 rounded-full">Enregistrer</button>
+        <p className="f-body text-xs text-[#14213D]/40 mt-2">
+          Champ purement informatif, pour garder une trace de ton compte de réception — il n'agit pas sur les paiements.
+          Les paiements CinetPay (achats, abonnements) arrivent automatiquement sur ton compte marchand CinetPay ; c'est
+          dans ton espace CinetPay (Réglages → Compte de règlement) que tu indiques vers quel numéro Mobile Money ou
+          compte bancaire CinetPay doit reverser ces fonds — cela ne se configure pas depuis cette application.
+        </p>
+      </div>
+
+      <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
+        <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-2">Sécurité</p>
+        <button onClick={() => setOwnerToken(null)} className="f-mono text-xs bg-[#14213D]/10 text-[#14213D] px-3 py-2 rounded-full">Se déconnecter</button>
+        <p className="f-body text-xs text-[#14213D]/40 mt-2">
+          Le code d'accès propriétaire se change côté serveur (variable d'environnement <code>OWNER_PASSCODE</code> chez ton hébergeur), pas depuis cette page — voir le README.
+        </p>
+      </div>
+
+      <h3 className="f-display font-semibold text-sm text-[#14213D] mb-3">Détail des commandes ({orders.length})</h3>
+      <div className="space-y-2">
+        {[...orders].reverse().map((o) => {
+          const c = o.commission ?? o.total * (o.feeRate ?? feeRate);
+          return (
+            <div key={o.id} className="ticket bg-white border-2 border-[#14213D]/10 p-3 flex items-center justify-between">
+              <div>
+                <p className="f-body text-sm text-[#14213D]">#{o.id.slice(-6)} · {o.zone}</p>
+                <p className="f-mono text-xs text-[#14213D]/40">{o.total.toLocaleString("fr-FR")} F · commission {Math.round(c).toLocaleString("fr-FR")} F</p>
+              </div>
+              <StatusBadge status={o.status} />
+            </div>
+          );
+        })}
+        {orders.length === 0 && <p className="f-body text-sm text-[#14213D]/40">Aucune commande pour l'instant.</p>}
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [role, setRole] = useState("home");
+  const [products, setProducts] = useState([]);
+  const [orders, setOrders] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [zone, setZone] = useState("");
+  const [cart, setCart] = useState([]);
+  const [showCart, setShowCart] = useState(false);
+  const [buyerInfo, setBuyerInfo] = useState({ name: "", phone: "", registered: false });
+  const [vendorInfo, setVendorInfo] = useState({ name: "", phone: "", registered: false });
+  const [courierInfo, setCourierInfo] = useState({ name: "", phone: "", registered: false });
+  const [feeRate, setFeeRate] = useState(DEFAULT_FEE_RATE);
+  const [accessFee, setAccessFee] = useState(DEFAULT_ACCESS_FEE);
+  const [trialDays, setTrialDays] = useState(DEFAULT_TRIAL_DAYS);
+  const [ownerPayoutInfo, setOwnerPayoutInfo] = useState("");
+
+  const [ownerToken, setOwnerToken] = useState(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const [p, o, s] = await Promise.all([apiGet("/api/products"), apiGet("/api/orders"), apiGet("/api/settings")]);
+      setProducts(p);
+      setOrders(o);
+      setFeeRate(s.feeRate ?? DEFAULT_FEE_RATE);
+      setAccessFee(s.accessFee ?? DEFAULT_ACCESS_FEE);
+      setTrialDays(s.trialDays ?? DEFAULT_TRIAL_DAYS);
+      setOwnerPayoutInfo(s.ownerPayoutInfo ?? "");
+    } catch (e) {
+      console.error("Erreur de rafraîchissement depuis le serveur:", e);
+    }
+    setLoading(false);
+  }, []);
+
+  // Au premier chargement, on retrouve le "je suis connecté en tant que..." mémorisé
+  // sur cet appareil, puis on va chercher chez le serveur le vrai statut d'abonnement
+  // (partagé entre tous les appareils du même vendeur/livreur).
+  useEffect(() => {
+    (async () => {
+      const b = loadProfile("buyer");
+      const v = loadProfile("vendor");
+      const c = loadProfile("courier");
+      if (b) setBuyerInfo(b);
+      if (v) {
+        setVendorInfo(v);
+        try {
+          const p = await apiGet(`/api/profiles/vendor/${encodeURIComponent(v.phone)}`);
+          setVendorInfo((cur) => ({ ...cur, ...p, registered: true }));
+        } catch { /* profil pas encore côté serveur, ignoré */ }
+      }
+      if (c) {
+        setCourierInfo(c);
+        try {
+          const p = await apiGet(`/api/profiles/courier/${encodeURIComponent(c.phone)}`);
+          setCourierInfo((cur) => ({ ...cur, ...p, registered: true }));
+        } catch { /* idem */ }
+      }
+    })();
+  }, []);
+
+  function registerBuyer(info) {
+    const next = { ...info, registered: true };
+    setBuyerInfo(next);
+    saveProfile("buyer", next);
+  }
+  async function registerVendor(info) {
+    const merged = { ...vendorInfo, ...info, registered: true };
+    setVendorInfo(merged);
+    saveProfile("vendor", merged);
+    try {
+      const profile = await apiSend(`/api/profiles/vendor/${encodeURIComponent(info.phone)}`, "PUT", { name: info.name }, getPhoneToken(info.phone));
+      setVendorInfo((cur) => ({ ...cur, ...profile, registered: true }));
+    } catch (e) {
+      console.error("Erreur d'inscription vendeur:", e);
+    }
+  }
+  async function registerCourier(info) {
+    const merged = { ...courierInfo, ...info, registered: true };
+    setCourierInfo(merged);
+    saveProfile("courier", merged);
+    try {
+      const profile = await apiSend(`/api/profiles/courier/${encodeURIComponent(info.phone)}`, "PUT", { name: info.name }, getPhoneToken(info.phone));
+      setCourierInfo((cur) => ({ ...cur, ...profile, registered: true }));
+    } catch (e) {
+      console.error("Erreur d'inscription livreur:", e);
+    }
+  }
+  // Appelé une fois qu'un changement de numéro (vendeur/livreur) a réussi côté
+  // serveur — met à jour l'état local (nom + nouveau numéro) et le stockage "je suis connecté".
+  function applyChangedPhone(which, profile) {
+    if (which === "vendor") {
+      const next = { ...vendorInfo, ...profile, registered: true };
+      setVendorInfo(next);
+      saveProfile("vendor", next);
+    } else {
+      const next = { ...courierInfo, ...profile, registered: true };
+      setCourierInfo(next);
+      saveProfile("courier", next);
+    }
+  }
+  function logoutBuyer() { setBuyerInfo({ name: "", phone: "", registered: false }); clearProfile("buyer"); }
+  function logoutVendor() { setVendorInfo({ name: "", phone: "", registered: false }); clearProfile("vendor"); }
+  function logoutCourier() { setCourierInfo({ name: "", phone: "", registered: false }); clearProfile("courier"); }
+
+  // NB : il n'y a plus de fonction "activer l'abonnement" appelable côté client —
+  // ça permettrait de s'abonner sans payer. L'activation se fait uniquement dans
+  // le webhook serveur /api/cinetpay/notify, une fois le paiement vérifié auprès
+  // de CinetPay. Après paiement, le prochain refresh() récupère le nouveau statut.
+
+  // Réglages (commission, abonnement, coordonnées de règlement) : réservés au
+  // propriétaire connecté (jeton reçu après /api/owner/login).
+  async function updateFeeRate(rate) {
+    const clamped = Math.min(0.5, Math.max(0, rate || 0));
+    const s = await apiSend("/api/settings", "PUT", { feeRate: clamped }, ownerToken);
+    setFeeRate(s.feeRate);
+  }
+  async function updateAccessSettings(fee, days) {
+    const clampedFee = Math.max(0, Number(fee) || 0);
+    const clampedDays = Math.max(0, Number(days) || 0);
+    const s = await apiSend("/api/settings", "PUT", { accessFee: clampedFee, trialDays: clampedDays }, ownerToken);
+    setAccessFee(s.accessFee);
+    setTrialDays(s.trialDays);
+  }
+  async function updateOwnerPayoutInfo(info) {
+    const s = await apiSend("/api/settings", "PUT", { ownerPayoutInfo: info }, ownerToken);
+    setOwnerPayoutInfo(s.ownerPayoutInfo);
+  }
+
+  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    if (role === "home") return;
+    const interval = setInterval(refresh, 2500); // rafraîchissement rapide pour que livreurs et acheteurs voient vite les nouvelles commandes/propositions
+    return () => clearInterval(interval);
+  }, [role, refresh]);
+
+
+  async function addProduct(p) {
+    const created = await apiSend("/api/products", "POST", p, getPhoneToken(p.vendorPhone));
+    setProducts((prev) => [created, ...prev]);
+  }
+  async function updateProduct(id, patch) {
+    const updated = await apiSend(`/api/products/${id}`, "PATCH", patch, getPhoneToken(vendorInfo.phone));
+    setProducts((prev) => prev.map((p) => (p.id === id ? updated : p)));
+  }
+  async function deleteProduct(id) {
+    await apiSend(`/api/products/${id}`, "DELETE", undefined, getPhoneToken(vendorInfo.phone));
+    setProducts((prev) => prev.filter((p) => p.id !== id));
+  }
+  // Retourne la commande créée (utile pour le paiement CinetPay, qui doit relier un
+  // transaction_id à une commande déjà existante AVANT de lancer le guichet).
+  async function placeOrder(total, deliveryFee = 0, orderZone = zone, payInfo = {}, shippingMethod = "livreur") {
+    const created = await apiSend("/api/orders", "POST", {
+      buyerName: buyerInfo.name,
+      buyerPhone: buyerInfo.phone,
+      zone: orderZone,
+      items: cart,
+      total,
+      deliveryFee,
+      paymentMethod: payInfo.paymentMethod || "cod",
+      cinetpayTransactionId: payInfo.transactionId || null,
+      shippingMethod,
+    }, getPhoneToken(buyerInfo.phone));
+    setOrders((prev) => [created, ...prev]);
+    setCart([]);
+    setShowCart(false);
+    // Le stock a été décrémenté côté serveur dans la même transaction — on
+    // rafraîchit les produits pour refléter les nouvelles quantités partout.
+    try {
+      setProducts(await apiGet("/api/products"));
+    } catch { /* la prochaine boucle de rafraîchissement s'en chargera */ }
+    return created;
+  }
+  async function confirmOrder(id) {
+    const updated = await apiSend(`/api/orders/${id}`, "PATCH", { status: "confirmee" }, getPhoneToken(vendorInfo.phone));
+    setOrders((prev) => prev.map((o) => (o.id === id ? updated : o)));
+  }
+  // Le vendeur confie le colis à une compagnie de transport (envoi inter-villes).
+  async function shipOrder(id, transportCompany, trackingNumber) {
+    const updated = await apiSend(`/api/orders/${id}`, "PATCH", { status: "en_transit", transportCompany, trackingNumber }, getPhoneToken(vendorInfo.phone));
+    setOrders((prev) => prev.map((o) => (o.id === id ? updated : o)));
+  }
+  // Utilisée par le vendeur (annuler une commande) ET par l'acheteur (annuler sa
+  // propre commande si le paiement CinetPay échoue avant d'être confirmé).
+  async function cancelOrder(id, asBuyer = false) {
+    const token = asBuyer ? getPhoneToken(buyerInfo.phone) : getPhoneToken(vendorInfo.phone);
+    const updated = await apiSend(`/api/orders/${id}`, "PATCH", { status: "annulee" }, token);
+    setOrders((prev) => prev.map((o) => (o.id === id ? updated : o)));
+  }
+  // Un livreur propose (ou met à jour) son prix pour une commande — n'assigne rien
+  // encore, ça reste une simple proposition tant que l'acheteur n'a pas choisi.
+  async function submitCourierBid(id, courier, fee) {
+    const updated = await apiSend(`/api/orders/${id}/bids`, "POST", { courierName: courier.name, courierPhone: courier.phone, fee }, getPhoneToken(courier.phone));
+    setOrders((prev) => prev.map((o) => (o.id === id ? updated : o)));
+  }
+  // L'acheteur choisit une des propositions reçues : la commande est alors assignée
+  // à ce livreur et passe en livraison.
+  async function chooseCourierForOrder(id, bid) {
+    const updated = await apiSend(`/api/orders/${id}/choose-courier`, "POST", { courierName: bid.courierName, courierPhone: bid.courierPhone, fee: bid.fee }, getPhoneToken(buyerInfo.phone));
+    setOrders((prev) => prev.map((o) => (o.id === id ? updated : o)));
+  }
+  async function updateStatus(id, status) {
+    const updated = await apiSend(`/api/orders/${id}`, "PATCH", { status }, getPhoneToken(vendorInfo.phone));
+    setOrders((prev) => prev.map((o) => (o.id === id ? updated : o)));
+  }
+  // Double confirmation de réception (mode livreur) : le livreur confirme avoir
+  // livré, l'acheteur confirme avoir reçu — indépendamment. La commande ne passe
+  // "livrée" que quand les deux ont confirmé, et le vendeur voit les deux statuts.
+  async function confirmDeliveryByCourier(id) {
+    const updated = await apiSend(`/api/orders/${id}/confirm-courier`, "POST", undefined, getPhoneToken(courierInfo.phone));
+    setOrders((prev) => prev.map((o) => (o.id === id ? updated : o)));
+  }
+  async function confirmDeliveryByBuyer(id) {
+    const updated = await apiSend(`/api/orders/${id}/confirm-buyer`, "POST", undefined, getPhoneToken(buyerInfo.phone));
+    setOrders((prev) => prev.map((o) => (o.id === id ? updated : o)));
+  }
+
+  const myOrders = orders.filter((o) => o.buyerPhone === buyerInfo.phone && buyerInfo.phone);
+
+  return (
+    <div className="min-h-screen bg-[#FBF7F0]" style={{ fontFamily: "Inter, sans-serif" }}>
+      <style>{FONT_STYLE}</style>
+      <TopBar role={role} setRole={setRole} cartCount={cart.reduce((s, i) => s + i.qty, 0)} onCartClick={() => setShowCart(true)} />
+      {loading ? (
+        <div className="text-center py-24 f-body text-sm text-[#14213D]/40">Chargement…</div>
+      ) : (
+        <>
+          {role === "home" && <Home setRole={setRole} />}
+          {role === "buyer" && (
+            <BuyerView
+              products={products} zone={zone} setZone={setZone}
+              cart={cart} setCart={setCart}
+              buyerInfo={buyerInfo} registerBuyer={registerBuyer} logoutBuyer={logoutBuyer}
+              placeOrder={placeOrder} cancelOrder={cancelOrder} showCart={showCart} setShowCart={setShowCart}
+              myOrders={myOrders} chooseCourierForOrder={chooseCourierForOrder} confirmDeliveryByBuyer={confirmDeliveryByBuyer}
+            />
+          )}
+          {role === "vendor" && (
+            <VendorView
+              vendorInfo={vendorInfo} registerVendor={registerVendor} logoutVendor={logoutVendor}
+              products={products} addProduct={addProduct} updateProduct={updateProduct} deleteProduct={deleteProduct}
+              orders={orders} confirmOrder={confirmOrder} cancelOrder={cancelOrder} shipOrder={shipOrder} updateStatus={updateStatus} setRole={setRole}
+              trialDays={trialDays} accessFee={accessFee} onPhoneChanged={(profile) => applyChangedPhone("vendor", profile)}
+            />
+          )}
+          {role === "courier" && (
+            <CourierView
+              courierInfo={courierInfo} registerCourier={registerCourier} logoutCourier={logoutCourier} orders={orders} submitCourierBid={submitCourierBid} updateStatus={updateStatus} confirmDeliveryByCourier={confirmDeliveryByCourier}
+              trialDays={trialDays} accessFee={accessFee} onPhoneChanged={(profile) => applyChangedPhone("courier", profile)}
+            />
+          )}
+          {role === "owner" && (
+            <OwnerView orders={orders} feeRate={feeRate} updateFeeRate={updateFeeRate} accessFee={accessFee} trialDays={trialDays} updateAccessSettings={updateAccessSettings} ownerPayoutInfo={ownerPayoutInfo} updateOwnerPayoutInfo={updateOwnerPayoutInfo} ownerToken={ownerToken} setOwnerToken={setOwnerToken} />
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+
+    const rootEl = document.getElementById("root");
+    ReactDOM.createRoot(rootEl).render(React.createElement(App));
+</script>
+
+<!--
+  NOTE IMPORTANTE — Zonako, version connectée au backend partagé
+  -----------------------------------------------------------------
+  Ce fichier n'est PAS autonome : il appelle une API (/api/...) qui doit être
+  servie par le serveur Express du même projet (voir server.js). Il ne
+  fonctionne pas si tu l'ouvres seul en double-cliquant dessus, ni si tu le
+  déposes sur un hébergeur de fichiers statiques sans le serveur qui va avec
+  (Netlify/Vercel "statique" ne suffira pas ici). Voir le README.md du
+  projet pour le déploiement complet (serveur + base de données).
+
+  Contrairement à la version précédente (localStorage), les données
+  (produits, commandes, profils, réglages) sont maintenant stockées dans une
+  vraie base PostgreSQL partagée : un vendeur qui publie un produit sur son
+  téléphone est vu immédiatement par un acheteur sur un autre téléphone.
+
+  PAIEMENT CINETPAY (achats clients + abonnements vendeur/livreur)
+  -------------------------------------------------------------------
+  Avant d'aller en production, remplace apikey/site_id dans CINETPAY_CONFIG
+  (en haut de ce fichier) par tes vrais identifiants marchand CinetPay, mets
+  notify_url sur ton vrai domaine + /api/cinetpay/notify, et passe mode à
+  "PRODUCTION". La confirmation de paiement N'EST PLUS basée sur la seule
+  réponse reçue dans le navigateur (CinetPay.waitResponse) : chaque commande
+  démarre non payée, et c'est le webhook serveur /api/cinetpay/notify qui
+  interroge directement l'API CinetPay pour connaître le vrai statut avant
+  de marquer une commande "payée" — voir server.js. Ajoute aussi
+  CINETPAY_APIKEY/CINETPAY_SITE_ID comme variables d'environnement côté
+  serveur (nécessaires pour cette vérification).
+
+  VÉRIFICATION SMS DES COMPTES
+  --------------------------------
+  Acheteur, vendeur et livreur confirment maintenant leur numéro par un code
+  reçu par SMS avant de pouvoir agir (publier un produit, commander,
+  proposer un prix, confirmer une livraison...). Configure Twilio Verify
+  côté serveur (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN /
+  TWILIO_VERIFY_SERVICE_SID) pour de vrais SMS — sans ça, les codes
+  s'affichent dans les logs du serveur (mode test).
+
+  ENCHÈRE DE LIVRAISON ET DOUBLE CONFIRMATION
+  ------------------------------------------------
+  Dès qu'une commande "livreur" est créée, elle est visible par tous les
+  livreurs (table orders côté serveur) sans attendre la confirmation du
+  vendeur. Les livreurs proposent un prix (POST /api/orders/:id/bids),
+  l'acheteur compare et choisit (POST /api/orders/:id/choose-courier). La
+  commande ne passe "livrée" que lorsque livreur ET acheteur ont chacun
+  confirmé indépendamment (POST /api/orders/:id/confirm-courier et
+  /confirm-buyer) — le vendeur voit les deux statuts séparément.
+
+  ACCÈS PROPRIÉTAIRE
+  -----------------------
+  Le code d'accès propriétaire est réglé côté serveur, dans la variable
+  d'environnement OWNER_PASSCODE (jamais dans ce fichier ni visible du
+  navigateur). Le serveur vérifie le code et délivre un jeton temporaire
+  (12h) utilisé pour les actions protégées (modifier la commission,
+  l'abonnement, les coordonnées de règlement). Voir le README.md pour
+  définir ou changer ce code chez ton hébergeur.
+
+  ABONNEMENT VENDEUR / LIVREUR (paywall + essai gratuit)
+  -----------------------------------------------------------
+  Le statut d'abonnement (essai/actif/expiré) est maintenant stocké dans la
+  table "profiles" côté serveur, par numéro de téléphone — donc valable sur
+  tous les appareils, plus seulement sur celui où le vendeur/livreur s'est
+  inscrit. Le prix et la durée d'essai se règlent depuis l'espace
+  propriétaire (table settings, protégée par le jeton propriétaire).
+-->
+</body>
+</html>
