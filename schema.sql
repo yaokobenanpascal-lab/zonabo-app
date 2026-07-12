@@ -49,8 +49,32 @@ CREATE TABLE IF NOT EXISTS profiles (
   trial_started_at BIGINT,
   subscription_status TEXT DEFAULT 'trial',
   subscription_expires_at BIGINT,
+  suspended BOOLEAN NOT NULL DEFAULT false,
+  suspended_reason TEXT,
+  suspended_at BIGINT,
   PRIMARY KEY (role, phone)
 );
+
+-- Migration pour les bases déjà existantes : CREATE TABLE IF NOT EXISTS ne
+-- modifie pas une table déjà créée, donc on ajoute les nouvelles colonnes ici.
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS suspended BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS suspended_reason TEXT;
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS suspended_at BIGINT;
+
+-- Signalements des acheteurs contre un vendeur (produit non conforme, jamais
+-- reçu, arnaque suspectée...) — sert à repérer les vendeurs à risque.
+CREATE TABLE IF NOT EXISTS vendor_reports (
+  id TEXT PRIMARY KEY,
+  order_id TEXT,
+  vendor_phone TEXT NOT NULL,
+  buyer_phone TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  details TEXT,
+  status TEXT NOT NULL DEFAULT 'open', -- open | reviewed
+  created_at BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_reports_vendor ON vendor_reports(vendor_phone);
 
 CREATE TABLE IF NOT EXISTS settings (
   id INTEGER PRIMARY KEY DEFAULT 1,
@@ -90,6 +114,44 @@ CREATE TABLE IF NOT EXISTS verified_phones (
   phone TEXT PRIMARY KEY,
   verified_at BIGINT NOT NULL
 );
+
+-- Contenu modifiable par le propriétaire sans redéploiement : textes affichés
+-- aux trois rôles, plus la liste des zones et des catégories de produits.
+CREATE TABLE IF NOT EXISTS site_content (
+  id INTEGER PRIMARY KEY DEFAULT 1,
+  home_headline TEXT,
+  home_subheadline TEXT,
+  role_desc_buyer TEXT,
+  role_desc_vendor TEXT,
+  role_desc_courier TEXT,
+  tip_buyer TEXT,
+  tip_vendor TEXT,
+  tip_courier TEXT,
+  zones JSONB,
+  categories JSONB,
+  CONSTRAINT single_row_content CHECK (id = 1)
+);
+
+INSERT INTO site_content (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+
+-- Migration pour les bases déjà existantes.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS refund_status TEXT NOT NULL DEFAULT 'none'; -- none | pending | done
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT false;
+
+-- Notes laissées par l'acheteur sur le vendeur et/ou le livreur, une fois la
+-- commande livrée — sert à afficher une réputation et à repérer les problèmes tôt.
+CREATE TABLE IF NOT EXISTS ratings (
+  id TEXT PRIMARY KEY,
+  order_id TEXT NOT NULL,
+  buyer_phone TEXT NOT NULL,
+  ratee_phone TEXT NOT NULL,
+  ratee_role TEXT NOT NULL, -- 'vendor' ou 'courier'
+  stars INTEGER NOT NULL CHECK (stars BETWEEN 1 AND 5),
+  comment TEXT,
+  created_at BIGINT NOT NULL,
+  UNIQUE (order_id, ratee_phone)
+);
+CREATE INDEX IF NOT EXISTS idx_ratings_ratee ON ratings(ratee_phone);
 
 CREATE INDEX IF NOT EXISTS idx_products_zone ON products(zone);
 CREATE INDEX IF NOT EXISTS idx_orders_buyer ON orders(buyer_phone);
