@@ -7,6 +7,7 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const { Pool } = require("pg");
+const nodemailer = require("nodemailer");
 
 const app = express();
 app.use(express.json());
@@ -34,6 +35,31 @@ const TWILIO_VERIFY_SERVICE_SID = process.env.TWILIO_VERIFY_SERVICE_SID || "";
 const TWILIO_CONFIGURED = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_VERIFY_SERVICE_SID;
 if (!TWILIO_CONFIGURED) {
   console.warn("⚠️  Twilio Verify non configuré — les codes SMS s'afficheront dans les logs du serveur au lieu d'être envoyés par SMS (mode test).");
+}
+
+// Connexion par email (en plus du téléphone) — envoie un code par email via
+// SMTP. Fonctionne avec Gmail (mot de passe d'application), ou n'importe quel
+// fournisseur SMTP classique. Facultatif : sans réglage, les codes email
+// s'affichent dans les logs du serveur, comme pour les SMS.
+const SMTP_HOST = process.env.SMTP_HOST || "";
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_USER = process.env.SMTP_USER || "";
+const SMTP_PASS = process.env.SMTP_PASS || "";
+const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER;
+const SMTP_CONFIGURED = SMTP_HOST && SMTP_USER && SMTP_PASS;
+if (!SMTP_CONFIGURED) {
+  console.warn("⚠️  SMTP non configuré — les codes envoyés par email s'afficheront dans les logs du serveur (mode test).");
+}
+const mailTransporter = SMTP_CONFIGURED
+  ? nodemailer.createTransport({ host: SMTP_HOST, port: SMTP_PORT, secure: SMTP_PORT === 465, auth: { user: SMTP_USER, pass: SMTP_PASS } })
+  : null;
+async function sendEmailCode(email, code) {
+  await mailTransporter.sendMail({
+    from: SMTP_FROM,
+    to: email,
+    subject: "Ton code de vérification Zonako",
+    text: `Ton code de vérification Zonako est : ${code}\n\nIl est valable 10 minutes.`,
+  });
 }
 
 const pool = new Pool({
@@ -123,6 +149,7 @@ function mapOrder(r) {
     shippingMethod: r.shipping_method, transportCompany: r.transport_company, trackingNumber: r.tracking_number,
     courierBids: r.courier_bids || [], courierConfirmed: r.courier_confirmed, courierConfirmedAt: r.courier_confirmed_at ? Number(r.courier_confirmed_at) : null,
     buyerConfirmed: r.buyer_confirmed, buyerConfirmedAt: r.buyer_confirmed_at ? Number(r.buyer_confirmed_at) : null,
+    refundStatus: r.refund_status || "none",
   };
 }
 function mapProfile(r) {
@@ -131,6 +158,16 @@ function mapProfile(r) {
     trialStartedAt: r.trial_started_at ? Number(r.trial_started_at) : null,
     subscriptionStatus: r.subscription_status,
     subscriptionExpiresAt: r.subscription_expires_at ? Number(r.subscription_expires_at) : null,
+    suspended: r.suspended || false,
+    suspendedReason: r.suspended_reason || null,
+    suspendedAt: r.suspended_at ? Number(r.suspended_at) : null,
+    verified: r.verified || false,
+  };
+}
+function mapReport(r) {
+  return {
+    id: r.id, orderId: r.order_id, vendorPhone: r.vendor_phone, buyerPhone: r.buyer_phone,
+    reason: r.reason, details: r.details, status: r.status, createdAt: Number(r.created_at),
   };
 }
 function mapSettings(r) {
@@ -159,10 +196,65 @@ async function twilioCheckCode(phone, code) {
   return data.status === "approved";
 }
 
-app.post("/api/auth/send-code", async (req, res) => {
-  const { phone } = req.body;
-  if (!phone) return res.status(400).json({ error: "Numéro de téléphone requis." });
+// Envoi d'un SMS "libre" (pas un code OTP) — utilisé pour notifier les
+// utilisateurs des changements de statut de commande. Nécessite en plus
+// TWILIO_FROM_NUMBER (un numéro Twilio acheté, différent du Verify Service).
+// Si non configuré, la notification est simplement ignorée (pas d'erreur).
+const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER || "";
+async function sendSmsNotification(phone, message) {
+  if (!TWILIO_CONFIGURED || !TWILIO_FROM_NUMBER || !phone) return;
   try {
+    const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
+    await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`, {
+      method: "POST",
+      headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ From: TWILIO_FROM_NUMBER, To: phone, Body: message }),
+    });
+  } catch (e) {
+    console.error("Erreur d'envoi SMS de notification (non bloquant):", e.message);
+  }
+}
+
+// Anti-abus : au plus 3 demandes de code par numéro et par heure, pour éviter
+// le spam/harcèlement d'un numéro et limiter les coûts SMS.
+const otpRateLimit = new Map(); // phone -> [timestamps]
+function isRateLimited(phone) {
+  const now = Date.now();
+  const hourAgo = now - 3600 * 1000;
+  const hits = (otpRateLimit.get(phone) || []).filter((t) => t > hourAgo);
+  otpRateLimit.set(phone, hits);
+  return hits.length >= 3;
+}
+function recordOtpAttempt(phone) {
+  const hits = otpRateLimit.get(phone) || [];
+  hits.push(Date.now());
+  otpRateLimit.set(phone, hits);
+}
+
+app.post("/api/auth/send-code", async (req, res) => {
+  const { phone } = req.body; // "phone" reste le nom du champ pour rester compatible, mais peut être un email
+  if (!phone) return res.status(400).json({ error: "Numéro de téléphone ou email requis." });
+  if (isRateLimited(phone)) {
+    return res.status(429).json({ error: "Trop de demandes de code pour cet identifiant. Réessaie dans une heure." });
+  }
+  const isEmail = phone.includes("@");
+  try {
+    if (isEmail) {
+      // Connexion par email : toujours via notre propre code à 6 chiffres (Twilio Verify ne gère pas l'email).
+      const code = String(Math.floor(100000 + Math.random() * 900000));
+      await pool.query(
+        `INSERT INTO otp_codes (phone, code, expires_at, attempts) VALUES ($1,$2,$3,0)
+         ON CONFLICT (phone) DO UPDATE SET code = $2, expires_at = $3, attempts = 0`,
+        [phone, code, Date.now() + 10 * 60 * 1000]
+      );
+      if (SMTP_CONFIGURED) {
+        await sendEmailCode(phone, code);
+      } else {
+        console.log(`[MODE TEST — pas de SMTP configuré] Code de vérification pour ${phone} : ${code}`);
+      }
+      recordOtpAttempt(phone);
+      return res.json({ ok: true, testMode: !SMTP_CONFIGURED });
+    }
     if (TWILIO_CONFIGURED) {
       await twilioSendCode(phone);
     } else {
@@ -175,6 +267,7 @@ app.post("/api/auth/send-code", async (req, res) => {
       );
       console.log(`[MODE TEST — pas de Twilio configuré] Code de vérification pour ${phone} : ${code}`);
     }
+    recordOtpAttempt(phone);
     res.json({ ok: true, testMode: !TWILIO_CONFIGURED });
   } catch (e) {
     console.error("Erreur d'envoi du code:", e);
@@ -184,10 +277,11 @@ app.post("/api/auth/send-code", async (req, res) => {
 
 app.post("/api/auth/verify-code", async (req, res) => {
   const { phone, code } = req.body;
-  if (!phone || !code) return res.status(400).json({ error: "Numéro et code requis." });
+  if (!phone || !code) return res.status(400).json({ error: "Identifiant et code requis." });
+  const isEmail = phone.includes("@");
   try {
     let ok = false;
-    if (TWILIO_CONFIGURED) {
+    if (!isEmail && TWILIO_CONFIGURED) {
       ok = await twilioCheckCode(phone, code);
     } else {
       const { rows } = await pool.query("SELECT * FROM otp_codes WHERE phone = $1", [phone]);
@@ -211,12 +305,22 @@ app.post("/api/auth/verify-code", async (req, res) => {
 
 
 app.get("/api/products", async (req, res) => {
-  const { rows } = await pool.query("SELECT * FROM products ORDER BY created_at DESC");
+  // Les produits des vendeurs suspendus (signalés/vérifiés arnaqueurs) sont
+  // masqués de la liste publique, sans être supprimés (le vendeur les retrouve
+  // si sa suspension est levée).
+  const { rows } = await pool.query(
+    `SELECT p.* FROM products p
+     LEFT JOIN profiles pr ON pr.role = 'vendor' AND pr.phone = p.vendor_phone
+     WHERE COALESCE(pr.suspended, false) = false
+     ORDER BY p.created_at DESC`
+  );
   res.json(rows.map(mapProduct));
 });
 
 app.post("/api/products", requirePhone((req) => req.body.vendorPhone), async (req, res) => {
   const p = req.body;
+  const { rows: prof } = await pool.query("SELECT suspended FROM profiles WHERE role = 'vendor' AND phone = $1", [p.vendorPhone]);
+  if (prof[0]?.suspended) return res.status(403).json({ error: "Ton compte vendeur est suspendu. Contacte le propriétaire de la plateforme." });
   const id = uid();
   const createdAt = Date.now();
   await pool.query(
@@ -306,7 +410,7 @@ app.post("/api/orders", requirePhone((req) => req.body.buyerPhone), async (req, 
 // annuler sa propre commande (ex : paiement CinetPay refusé/annulé).
 app.patch("/api/orders/:id", async (req, res) => {
   const tokenPhone = getTokenPhone(req);
-  const { rows: existing } = await pool.query("SELECT items, buyer_phone FROM orders WHERE id = $1", [req.params.id]);
+  const { rows: existing } = await pool.query("SELECT items, buyer_phone, paid, status AS old_status FROM orders WHERE id = $1", [req.params.id]);
   if (!existing[0]) return res.status(404).json({ error: "Commande introuvable." });
   const vendorPhones = (existing[0].items || []).map((it) => it.vendorPhone).filter(Boolean);
   const isVendor = tokenPhone && vendorPhones.includes(tokenPhone);
@@ -322,11 +426,22 @@ app.patch("/api/orders/:id", async (req, res) => {
   for (const key of Object.keys(colMap)) {
     if (patch[key] !== undefined) { sets.push(`${colMap[key]} = $${i++}`); vals.push(patch[key]); }
   }
+  // Une commande déjà payée qui est annulée doit être remboursée — CinetPay
+  // n'offre pas d'API de remboursement automatique, donc on la place dans une
+  // file "à rembourser manuellement" que le propriétaire traite depuis son espace.
+  if (patch.status === "annulee" && existing[0].paid) {
+    sets.push(`refund_status = $${i++}`);
+    vals.push("pending");
+  }
   if (sets.length === 0) return res.status(400).json({ error: "Rien à mettre à jour." });
   vals.push(req.params.id);
   await pool.query(`UPDATE orders SET ${sets.join(", ")} WHERE id = $${i}`, vals);
   const { rows } = await pool.query("SELECT * FROM orders WHERE id = $1", [req.params.id]);
-  res.json(rows[0] ? mapOrder(rows[0]) : null);
+  const updated = rows[0] ? mapOrder(rows[0]) : null;
+  if (updated && patch.status === "confirmee" && existing[0].old_status !== "confirmee") {
+    sendSmsNotification(updated.buyerPhone, `Zonako : ta commande #${updated.id.slice(-6)} a été confirmée par le vendeur, elle est en préparation.`);
+  }
+  res.json(updated);
 });
 
 // Un livreur propose (ou met à jour) son prix — seulement en son propre nom.
@@ -353,7 +468,9 @@ app.post("/api/orders/:id/choose-courier", async (req, res) => {
     [courierName, courierPhone, Number(fee) || 0, req.params.id]
   );
   const { rows } = await pool.query("SELECT * FROM orders WHERE id = $1", [req.params.id]);
-  res.json(mapOrder(rows[0]));
+  const updated = mapOrder(rows[0]);
+  sendSmsNotification(courierPhone, `Zonako : tu as été choisi pour livrer la commande #${updated.id.slice(-6)} (${updated.zone}). Frais convenus : ${fee} F.`);
+  res.json(updated);
 });
 
 // Double confirmation de réception — chacun ne peut confirmer que son propre rôle sur SA commande.
@@ -485,6 +602,160 @@ app.post("/api/profiles/:role/change-phone", async (req, res) => {
 // L'activation se fait uniquement dans /api/cinetpay/notify, après vérification
 // réelle du paiement auprès de CinetPay (voir plus bas).
 
+// ==================== SÉCURITÉ / SIGNALEMENTS DE VENDEURS ====================
+// L'acheteur signale un problème sur une de ses propres commandes (produit non
+// conforme, jamais reçu, arnaque suspectée...). Le vendeur concerné est déduit
+// des articles de la commande.
+app.post("/api/reports", async (req, res) => {
+  const tokenPhone = getTokenPhone(req);
+  const { orderId, reason, details } = req.body;
+  if (!tokenPhone) return res.status(401).json({ error: "Numéro non vérifié." });
+  if (!orderId || !reason) return res.status(400).json({ error: "Commande et motif requis." });
+  const { rows } = await pool.query("SELECT buyer_phone, items FROM orders WHERE id = $1", [orderId]);
+  if (!rows[0]) return res.status(404).json({ error: "Commande introuvable." });
+  if (rows[0].buyer_phone !== tokenPhone) return res.status(403).json({ error: "Ce n'est pas ta commande." });
+  const vendorPhone = (rows[0].items || []).find((it) => it.vendorPhone)?.vendorPhone;
+  if (!vendorPhone) return res.status(400).json({ error: "Impossible d'identifier le vendeur de cette commande." });
+  const id = uid();
+  await pool.query(
+    "INSERT INTO vendor_reports (id, order_id, vendor_phone, buyer_phone, reason, details, status, created_at) VALUES ($1,$2,$3,$4,$5,$6,'open',$7)",
+    [id, orderId, vendorPhone, tokenPhone, reason, details || "", Date.now()]
+  );
+  res.json({ ok: true });
+});
+
+// Liste des signalements — réservée au propriétaire.
+app.get("/api/reports", requireOwner, async (req, res) => {
+  const { rows } = await pool.query("SELECT * FROM vendor_reports ORDER BY created_at DESC");
+  res.json(rows.map(mapReport));
+});
+
+app.post("/api/reports/:id/review", requireOwner, async (req, res) => {
+  await pool.query("UPDATE vendor_reports SET status = 'reviewed' WHERE id = $1", [req.params.id]);
+  res.json({ ok: true });
+});
+
+// Indicateurs de risque par vendeur (taux d'annulation, signalements...) —
+// réservé au propriétaire, pour repérer les comptes à surveiller.
+app.get("/api/vendors/risk", requireOwner, async (req, res) => {
+  const { rows: orders } = await pool.query("SELECT items, status FROM orders");
+  const { rows: reports } = await pool.query("SELECT vendor_phone, status FROM vendor_reports");
+  const { rows: vendorProfiles } = await pool.query("SELECT * FROM profiles WHERE role = 'vendor'");
+
+  const stats = {}; // phone -> { total, annulee, livree, name }
+  for (const o of orders) {
+    for (const it of (o.items || [])) {
+      if (!it.vendorPhone) continue;
+      stats[it.vendorPhone] = stats[it.vendorPhone] || { total: 0, annulee: 0, livree: 0 };
+      stats[it.vendorPhone].total += 1;
+      if (o.status === "annulee") stats[it.vendorPhone].annulee += 1;
+      if (o.status === "livree") stats[it.vendorPhone].livree += 1;
+      break; // ne compte la commande qu'une fois par vendeur, même avec plusieurs articles du même vendeur
+    }
+  }
+  const openReportsByVendor = {};
+  for (const r of reports) {
+    if (r.status !== "open") continue;
+    openReportsByVendor[r.vendor_phone] = (openReportsByVendor[r.vendor_phone] || 0) + 1;
+  }
+
+  const result = vendorProfiles.map((v) => {
+    const s = stats[v.phone] || { total: 0, annulee: 0, livree: 0 };
+    const cancelRate = s.total > 0 ? s.annulee / s.total : 0;
+    const openReports = openReportsByVendor[v.phone] || 0;
+    // Score de risque simple : signalements ouverts pèsent lourd, plus un taux
+    // d'annulation élevé sur un volume suffisant pour être significatif.
+    const risky = openReports > 0 || (s.total >= 5 && cancelRate > 0.4);
+    return {
+      phone: v.phone, name: v.name, suspended: v.suspended, suspendedReason: v.suspended_reason,
+      totalOrders: s.total, cancelledOrders: s.annulee, deliveredOrders: s.livree,
+      cancelRate: Math.round(cancelRate * 100), openReports, risky,
+    };
+  }).sort((a, b) => (b.openReports - a.openReports) || (b.cancelRate - a.cancelRate));
+
+  res.json(result);
+});
+
+app.post("/api/vendors/:phone/suspend", requireOwner, async (req, res) => {
+  const { reason } = req.body;
+  await pool.query(
+    "UPDATE profiles SET suspended = true, suspended_reason = $1, suspended_at = $2 WHERE role = 'vendor' AND phone = $3",
+    [reason || "", Date.now(), req.params.phone]
+  );
+  res.json({ ok: true });
+});
+
+app.post("/api/vendors/:phone/unsuspend", requireOwner, async (req, res) => {
+  await pool.query(
+    "UPDATE profiles SET suspended = false, suspended_reason = NULL, suspended_at = NULL WHERE role = 'vendor' AND phone = $1",
+    [req.params.phone]
+  );
+  res.json({ ok: true });
+});
+
+// ==================== NOTES (réputation vendeur/livreur) ====================
+// L'acheteur note le vendeur et/ou le livreur, uniquement sur une commande
+// qu'il a lui-même passée et une fois qu'elle est livrée.
+app.post("/api/ratings", async (req, res) => {
+  const tokenPhone = getTokenPhone(req);
+  const { orderId, rateePhone, rateeRole, stars, comment } = req.body;
+  if (!tokenPhone) return res.status(401).json({ error: "Numéro non vérifié." });
+  if (!orderId || !rateePhone || !rateeRole || !stars) return res.status(400).json({ error: "Informations manquantes." });
+  const { rows } = await pool.query("SELECT buyer_phone, status FROM orders WHERE id = $1", [orderId]);
+  if (!rows[0]) return res.status(404).json({ error: "Commande introuvable." });
+  if (rows[0].buyer_phone !== tokenPhone) return res.status(403).json({ error: "Ce n'est pas ta commande." });
+  if (rows[0].status !== "livree") return res.status(400).json({ error: "Tu ne peux noter qu'une commande livrée." });
+  const id = uid();
+  await pool.query(
+    `INSERT INTO ratings (id, order_id, buyer_phone, ratee_phone, ratee_role, stars, comment, created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+     ON CONFLICT (order_id, ratee_phone) DO UPDATE SET stars = $6, comment = $7`,
+    [id, orderId, tokenPhone, rateePhone, rateeRole, Math.max(1, Math.min(5, Number(stars))), comment || "", Date.now()]
+  );
+  res.json({ ok: true });
+});
+
+// Moyenne + nombre de notes pour un vendeur ou un livreur — public (visible par
+// les acheteurs avant de choisir), pas besoin d'être connecté.
+app.get("/api/ratings/:phone", async (req, res) => {
+  const { rows } = await pool.query(
+    "SELECT COUNT(*)::int AS count, COALESCE(AVG(stars), 0) AS avg FROM ratings WHERE ratee_phone = $1",
+    [req.params.phone]
+  );
+  res.json({ count: rows[0].count, average: Math.round(Number(rows[0].avg) * 10) / 10 });
+});
+
+// ==================== VÉRIFICATION DES LIVREURS ====================
+// Vérification manuelle (ex: pièce d'identité envoyée par WhatsApp) — le
+// propriétaire coche "vérifié" une fois qu'il a contrôlé l'identité du livreur.
+// N'empêche pas le livreur de travailler, mais affiche un badge de confiance
+// aux acheteurs quand ils comparent les propositions de prix.
+app.post("/api/couriers/:phone/verify", requireOwner, async (req, res) => {
+  await pool.query("UPDATE profiles SET verified = true WHERE role = 'courier' AND phone = $1", [req.params.phone]);
+  res.json({ ok: true });
+});
+app.post("/api/couriers/:phone/unverify", requireOwner, async (req, res) => {
+  await pool.query("UPDATE profiles SET verified = false WHERE role = 'courier' AND phone = $1", [req.params.phone]);
+  res.json({ ok: true });
+});
+app.get("/api/couriers", requireOwner, async (req, res) => {
+  const { rows } = await pool.query("SELECT * FROM profiles WHERE role = 'courier' ORDER BY trial_started_at DESC");
+  res.json(rows.map(mapProfile));
+});
+
+// ==================== REMBOURSEMENTS À TRAITER ====================
+// CinetPay n'offre pas d'API de remboursement automatique : cette liste
+// recense les commandes payées puis annulées, à rembourser manuellement
+// depuis le back-office CinetPay. Une fois fait, le propriétaire la marque "traité".
+app.get("/api/refunds", requireOwner, async (req, res) => {
+  const { rows } = await pool.query("SELECT * FROM orders WHERE refund_status != 'none' ORDER BY created_at DESC");
+  res.json(rows.map(mapOrder));
+});
+app.post("/api/orders/:id/refund-done", requireOwner, async (req, res) => {
+  await pool.query("UPDATE orders SET refund_status = 'done' WHERE id = $1", [req.params.id]);
+  res.json({ ok: true });
+});
+
 // ==================== RÉGLAGES (propriétaire) ====================
 app.get("/api/settings", async (req, res) => {
   const { rows } = await pool.query("SELECT * FROM settings WHERE id = 1");
@@ -503,6 +774,49 @@ app.put("/api/settings", requireOwner, async (req, res) => {
   if (sets.length) await pool.query(`UPDATE settings SET ${sets.join(", ")} WHERE id = 1`, vals);
   const { rows } = await pool.query("SELECT * FROM settings WHERE id = 1");
   res.json(mapSettings(rows[0]));
+});
+
+// ==================== CONTENU DE LA PLATEFORME (propriétaire) ====================
+// Textes affichés aux trois rôles, zones et catégories de produits — modifiables
+// depuis l'espace propriétaire, sans jamais toucher au code ni redéployer.
+function mapContent(r) {
+  return {
+    homeHeadline: r.home_headline,
+    homeSubheadline: r.home_subheadline,
+    roleDescBuyer: r.role_desc_buyer,
+    roleDescVendor: r.role_desc_vendor,
+    roleDescCourier: r.role_desc_courier,
+    tipBuyer: r.tip_buyer,
+    tipVendor: r.tip_vendor,
+    tipCourier: r.tip_courier,
+    zones: r.zones || [],
+    categories: r.categories || [],
+  };
+}
+
+app.get("/api/content", async (req, res) => {
+  const { rows } = await pool.query("SELECT * FROM site_content WHERE id = 1");
+  res.json(mapContent(rows[0]));
+});
+
+app.put("/api/content", requireOwner, async (req, res) => {
+  const b = req.body;
+  const colMap = {
+    homeHeadline: "home_headline", homeSubheadline: "home_subheadline",
+    roleDescBuyer: "role_desc_buyer", roleDescVendor: "role_desc_vendor", roleDescCourier: "role_desc_courier",
+    tipBuyer: "tip_buyer", tipVendor: "tip_vendor", tipCourier: "tip_courier",
+  };
+  const sets = [];
+  const vals = [];
+  let i = 1;
+  for (const key of Object.keys(colMap)) {
+    if (b[key] !== undefined) { sets.push(`${colMap[key]} = $${i++}`); vals.push(b[key] || null); }
+  }
+  if (b.zones !== undefined) { sets.push(`zones = $${i++}`); vals.push(JSON.stringify(b.zones)); }
+  if (b.categories !== undefined) { sets.push(`categories = $${i++}`); vals.push(JSON.stringify(b.categories)); }
+  if (sets.length) await pool.query(`UPDATE site_content SET ${sets.join(", ")} WHERE id = 1`, vals);
+  const { rows } = await pool.query("SELECT * FROM site_content WHERE id = 1");
+  res.json(mapContent(rows[0]));
 });
 
 // ==================== PAIEMENTS CINETPAY (vérifiés côté serveur) ====================
