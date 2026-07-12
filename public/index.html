@@ -67,6 +67,30 @@ const CINETPAY_CONFIG = {
   notify_url: "https://ton-domaine.com/api/cinetpay/notify",
 };
 
+// Upload de photos produit : Cloudinary permet un envoi direct depuis le
+// navigateur (sans passer par le serveur), avec un plan gratuit généreux.
+// 1. Crée un compte sur cloudinary.com (gratuit)
+// 2. Récupère ton "Cloud name" (tableau de bord, en haut)
+// 3. Crée un "Upload preset" non signé : Settings → Upload → Add upload preset
+//    → Signing mode: "Unsigned" → note son nom
+// 4. Remplace les deux valeurs ci-dessous
+const CLOUDINARY_CONFIG = {
+  cloudName: "REMPLACE_PAR_TON_CLOUD_NAME",
+  uploadPreset: "REMPLACE_PAR_TON_UPLOAD_PRESET",
+};
+async function uploadImageToCloudinary(file) {
+  if (CLOUDINARY_CONFIG.cloudName.startsWith("REMPLACE")) {
+    throw new Error("Cloudinary n'est pas encore configuré (voir CLOUDINARY_CONFIG en haut du fichier).");
+  }
+  const form = new FormData();
+  form.append("file", file);
+  form.append("upload_preset", CLOUDINARY_CONFIG.uploadPreset);
+  const r = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CONFIG.cloudName}/image/upload`, { method: "POST", body: form });
+  if (!r.ok) throw new Error("Échec de l'envoi de l'image.");
+  const data = await r.json();
+  return data.secure_url;
+}
+
 const ZONES = [
   "Abengourou", "Abidjan – Cocody", "Abidjan – Yopougon", "Abidjan – Adjamé",
   "Abidjan – Marcory", "Bouaké", "Yamoussoukro", "San-Pédro", "Korhogo", "Daloa"
@@ -318,6 +342,24 @@ function compressImage(file, maxWidth = 480, quality = 0.6) {
   });
 }
 
+// Petit cache mémoire pour éviter de refaire un appel réseau à chaque re-rendu
+// quand la même personne (vendeur/livreur) apparaît plusieurs fois à l'écran.
+const ratingsCache = new Map();
+function RatingBadge({ phone, compact = false }) {
+  const [rating, setRating] = useState(ratingsCache.get(phone) || null);
+  useEffect(() => {
+    let cancelled = false;
+    if (ratingsCache.has(phone)) { setRating(ratingsCache.get(phone)); return; }
+    apiGet(`/api/ratings/${encodeURIComponent(phone)}`).then((r) => {
+      ratingsCache.set(phone, r);
+      if (!cancelled) setRating(r);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [phone]);
+  if (!rating || rating.count === 0) return compact ? null : <span className="f-mono text-[10px] text-[#14213D]/30">Pas encore noté</span>;
+  return <span className="f-mono text-[10px] text-[#14213D]/60">★ {rating.average} ({rating.count})</span>;
+}
+
 function StatusBadge({ status }) {
   const map = {
     nouvelle: { label: "Attente confirmation", bg: "#F2A93B", fg: "#14213D", icon: Clock },
@@ -428,21 +470,125 @@ function TopBar({ role, setRole, cartCount, onCartClick }) {
   );
 }
 
-function Home({ setRole }) {
+// Mentions légales, CGU et politique de confidentialité — affichées en overlay,
+// accessibles à tous depuis le pied de page, sans avoir besoin d'être connecté.
+function LegalPage({ onClose }) {
+  const [tab, setTab] = useState("mentions");
+  return (
+    <div className="fixed inset-0 bg-[#FBF7F0] z-50 overflow-y-auto">
+      <div className="max-w-2xl mx-auto px-4 py-6">
+        <div className="flex items-center justify-between mb-6">
+          <h2 className="f-display font-semibold text-xl text-[#14213D]">Informations légales</h2>
+          <button onClick={onClose} className="f-mono text-xs bg-[#14213D]/10 text-[#14213D] px-3 py-1.5 rounded-full">Fermer ✕</button>
+        </div>
+
+        <div className="flex gap-2 mb-6 flex-wrap">
+          <button onClick={() => setTab("mentions")} className={`f-mono text-xs px-3 py-1.5 rounded-full ${tab === "mentions" ? "bg-[#14213D] text-white" : "bg-[#14213D]/5 text-[#14213D]/60"}`}>Mentions légales</button>
+          <button onClick={() => setTab("cgu")} className={`f-mono text-xs px-3 py-1.5 rounded-full ${tab === "cgu" ? "bg-[#14213D] text-white" : "bg-[#14213D]/5 text-[#14213D]/60"}`}>CGU</button>
+          <button onClick={() => setTab("confidentialite")} className={`f-mono text-xs px-3 py-1.5 rounded-full ${tab === "confidentialite" ? "bg-[#14213D] text-white" : "bg-[#14213D]/5 text-[#14213D]/60"}`}>Confidentialité</button>
+        </div>
+
+        {tab === "mentions" && (
+          <div className="f-body text-sm text-[#14213D]/80 space-y-4 leading-relaxed">
+            <p className="f-body text-xs text-[#14213D]/40 italic">Éditeur, hébergement et directeur de publication : informations à compléter par le propriétaire de la plateforme.</p>
+            <div>
+              <h3 className="f-display font-semibold text-[#14213D] mb-1">Éditeur de la plateforme</h3>
+              <p>Zonako — [Nom de l'éditeur à compléter]. Contact : [à compléter].</p>
+            </div>
+            <div>
+              <h3 className="f-display font-semibold text-[#14213D] mb-1">Hébergement</h3>
+              <p>Ce site est hébergé par Render Services, Inc. (render.com), et utilise les services de paiement CinetPay (cinetpay.com) et de vérification par SMS Twilio Inc. (twilio.com).</p>
+            </div>
+          </div>
+        )}
+
+        {tab === "cgu" && (
+          <div className="f-body text-sm text-[#14213D]/80 space-y-4 leading-relaxed">
+            <div>
+              <h3 className="f-display font-semibold text-[#14213D] mb-1">1. Objet</h3>
+              <p>Zonako est une plateforme de mise en relation entre acheteurs, vendeurs et livreurs, organisés par zone géographique. Zonako n'est ni vendeur, ni transporteur : elle met à disposition un outil technique de mise en relation.</p>
+            </div>
+            <div>
+              <h3 className="f-display font-semibold text-[#14213D] mb-1">2. Inscription et vérification</h3>
+              <p>L'inscription nécessite un numéro de téléphone vérifié par SMS. Chaque utilisateur est responsable de la confidentialité de son accès. Toute utilisation frauduleuse peut entraîner la suspension du compte.</p>
+            </div>
+            <div>
+              <h3 className="f-display font-semibold text-[#14213D] mb-1">3. Obligations du vendeur</h3>
+              <p>Le vendeur s'engage à décrire fidèlement ses produits, honorer les commandes confirmées, et ne publier que des produits légaux à la vente en Côte d'Ivoire. Tout signalement fondé peut entraîner une suspension.</p>
+            </div>
+            <div>
+              <h3 className="f-display font-semibold text-[#14213D] mb-1">4. Obligations du livreur</h3>
+              <p>Le livreur propose librement son tarif. Une fois choisi, il s'engage à livrer dans des conditions raisonnables et à confirmer la remise du colis.</p>
+            </div>
+            <div>
+              <h3 className="f-display font-semibold text-[#14213D] mb-1">5. Paiement</h3>
+              <p>Les paiements en ligne sont traités par CinetPay. Zonako ne stocke aucune donnée bancaire. Le paiement à la livraison s'effectue directement entre l'acheteur et le livreur/vendeur.</p>
+            </div>
+            <div>
+              <h3 className="f-display font-semibold text-[#14213D] mb-1">6. Commission</h3>
+              <p>Zonako prélève une commission sur chaque vente, dont le taux est affiché de manière transparente et peut évoluer. Les commandes déjà passées conservent le taux en vigueur au moment de l'achat.</p>
+            </div>
+            <div>
+              <h3 className="f-display font-semibold text-[#14213D] mb-1">7. Remboursements</h3>
+              <p>En cas de commande annulée après paiement en ligne, une demande de remboursement est initiée auprès du prestataire de paiement. Le délai dépend des procédures de CinetPay et de l'opérateur mobile money.</p>
+            </div>
+            <div>
+              <h3 className="f-display font-semibold text-[#14213D] mb-1">8. Suspension de compte</h3>
+              <p>Zonako peut suspendre, sans préavis, tout compte en cas de signalements fondés ou de non-respect des présentes conditions. L'utilisateur est informé du motif et peut contester la décision.</p>
+            </div>
+            <div>
+              <h3 className="f-display font-semibold text-[#14213D] mb-1">9. Responsabilité</h3>
+              <p>Zonako agit comme intermédiaire technique. La qualité des produits et la bonne exécution des livraisons relèvent de la responsabilité des vendeurs et livreurs.</p>
+            </div>
+            <div>
+              <h3 className="f-display font-semibold text-[#14213D] mb-1">10-11. Modification et droit applicable</h3>
+              <p>Zonako peut modifier ces CGU à tout moment. Elles sont soumises au droit ivoirien ; tout litige relève des juridictions compétentes de Côte d'Ivoire.</p>
+            </div>
+          </div>
+        )}
+
+        {tab === "confidentialite" && (
+          <div className="f-body text-sm text-[#14213D]/80 space-y-4 leading-relaxed">
+            <div>
+              <h3 className="f-display font-semibold text-[#14213D] mb-1">Données collectées</h3>
+              <p>Nom et numéro de téléphone (vérifié par SMS) pour les acheteurs, vendeurs et livreurs ; historique de commandes et zones de livraison. Aucune donnée bancaire n'est stockée par Zonako — elle transite uniquement par CinetPay.</p>
+            </div>
+            <div>
+              <h3 className="f-display font-semibold text-[#14213D] mb-1">Pourquoi ces données</h3>
+              <p>Mise en relation acheteur/vendeur/livreur, vérification d'identité par SMS, suivi des commandes, calcul des commissions, notifications liées aux commandes.</p>
+            </div>
+            <div>
+              <h3 className="f-display font-semibold text-[#14213D] mb-1">Vos droits</h3>
+              <p>Conformément à la Loi n°2013-450 du 19 juin 2013 relative à la protection des données à caractère personnel, régulée par l'ARTCI (Autorité de Régulation des Télécommunications/TIC de Côte d'Ivoire), vous disposez d'un droit d'accès, de rectification et de suppression de vos données. Contact : [à compléter].</p>
+            </div>
+            <div>
+              <h3 className="f-display font-semibold text-[#14213D] mb-1">Partage avec des tiers</h3>
+              <p>CinetPay (paiement) et Twilio (vérification SMS) reçoivent uniquement les informations strictement nécessaires à leur service. Zonako ne vend ni ne loue aucune donnée personnelle à des tiers à des fins commerciales.</p>
+            </div>
+          </div>
+        )}
+
+        <p className="f-body text-[11px] text-[#14213D]/30 mt-8 italic">Ce texte est un modèle de départ et ne remplace pas une relecture par un professionnel du droit.</p>
+      </div>
+    </div>
+  );
+}
+
+function Home({ setRole, content = {} }) {
   const roles = [
-    { key: "buyer", title: "Acheteur", desc: "Parcourir les produits de ta zone et commander", icon: ShoppingBag, color: "#F2A93B" },
-    { key: "vendor", title: "Vendeur", desc: "Publier tes produits et suivre tes commandes", icon: Store, color: "#2D6A4F" },
-    { key: "courier", title: "Livreur", desc: "Accepter des livraisons dans ta zone", icon: Bike, color: "#C1440E" },
+    { key: "buyer", title: "Acheteur", desc: content.roleDescBuyer || "Parcourir les produits de ta zone et commander", icon: ShoppingBag, color: "#F2A93B" },
+    { key: "vendor", title: "Vendeur", desc: content.roleDescVendor || "Publier tes produits et suivre tes commandes", icon: Store, color: "#2D6A4F" },
+    { key: "courier", title: "Livreur", desc: content.roleDescCourier || "Accepter des livraisons dans ta zone", icon: Bike, color: "#C1440E" },
   ];
   return (
     <div className="max-w-5xl mx-auto px-4 py-10">
       <div className="mb-10">
         <p className="f-mono text-xs uppercase tracking-widest text-[#C1440E] mb-2">Marché local, par zone</p>
         <h1 className="f-display text-3xl md:text-4xl font-semibold text-[#14213D] leading-tight">
-          Le commerce de ton quartier,<br />en ligne.
+          {content.homeHeadline || "Le commerce de ton quartier, en ligne."}
         </h1>
         <p className="f-body text-[#14213D]/60 mt-3 max-w-md">
-          Chaque produit est rattaché à une zone. Tu vois d'abord ce qui se vend et se livre près de chez toi.
+          {content.homeSubheadline || "Chaque produit est rattaché à une zone. Tu vois d'abord ce qui se vend et se livre près de chez toi."}
         </p>
       </div>
       <div className="grid sm:grid-cols-3 gap-4">
@@ -482,6 +628,7 @@ function getPhoneToken(phone) {
 // toutes les actions sensibles (publier un produit, commander, confirmer une
 // livraison...).
 function RegisterWithPhoneVerification({ title, subtitle, accentColor, onSubmit }) {
+  const [mode, setMode] = useState("phone"); // "phone" | "email"
   const [form, setForm] = useState({ name: "", phone: "" });
   const [step, setStep] = useState("info"); // "info" | "code"
   const [code, setCode] = useState("");
@@ -497,7 +644,7 @@ function RegisterWithPhoneVerification({ title, subtitle, accentColor, onSubmit 
       setTestMode(!!r.testMode);
       setStep("code");
     } catch {
-      setError("Impossible d'envoyer le code. Vérifie le numéro.");
+      setError(mode === "email" ? "Impossible d'envoyer le code. Vérifie l'adresse email." : "Impossible d'envoyer le code. Vérifie le numéro.");
     }
     setBusy(false);
   }
@@ -521,8 +668,19 @@ function RegisterWithPhoneVerification({ title, subtitle, accentColor, onSubmit 
       <p className="f-body text-sm text-[#14213D]/50 mb-5">{subtitle}</p>
       {step === "info" ? (
         <div className="space-y-3" onKeyDown={(e) => { if (e.key === "Enter" && form.name && form.phone) sendCode(); }}>
+          <div className="grid grid-cols-2 gap-2 mb-1">
+            <button type="button" onClick={() => { setMode("phone"); setForm({ ...form, phone: "" }); }} className={`f-mono text-xs px-3 py-2 rounded-lg border-2 ${mode === "phone" ? "border-current bg-black/5" : "border-[#14213D]/15 text-[#14213D]/50"}`} style={mode === "phone" ? { color: accentColor, borderColor: accentColor } : {}}>📱 Téléphone</button>
+            <button type="button" onClick={() => { setMode("email"); setForm({ ...form, phone: "" }); }} className={`f-mono text-xs px-3 py-2 rounded-lg border-2 ${mode === "email" ? "border-current bg-black/5" : "border-[#14213D]/15 text-[#14213D]/50"}`} style={mode === "email" ? { color: accentColor, borderColor: accentColor } : {}}>📧 Email</button>
+          </div>
           <input placeholder="Ton nom" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} onFocus={keepInView} className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-sm focus:outline-none" />
-          <input placeholder="Ton numéro de téléphone" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} onFocus={keepInView} className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-sm focus:outline-none" />
+          <input
+            type={mode === "email" ? "email" : "tel"}
+            placeholder={mode === "email" ? "Ton adresse email" : "Ton numéro de téléphone"}
+            value={form.phone}
+            onChange={(e) => setForm({ ...form, phone: e.target.value })}
+            onFocus={keepInView}
+            className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-sm focus:outline-none"
+          />
           {error && <p className="f-body text-xs text-[#C1440E]">{error}</p>}
           <button
             disabled={!form.name || !form.phone || busy}
@@ -530,20 +688,20 @@ function RegisterWithPhoneVerification({ title, subtitle, accentColor, onSubmit 
             className="w-full disabled:opacity-30 text-[#14213D] f-display font-semibold py-3 rounded-full text-sm"
             style={{ backgroundColor: accentColor }}
           >
-            {busy ? "Envoi…" : "Recevoir mon code par SMS"}
+            {busy ? "Envoi…" : mode === "email" ? "Recevoir mon code par email" : "Recevoir mon code par SMS"}
           </button>
         </div>
       ) : (
         <div className="space-y-3" onKeyDown={(e) => { if (e.key === "Enter" && code) verify(); }}>
           <p className="f-body text-xs text-[#14213D]/50">
-            Code envoyé au {form.phone}.{testMode ? " (Mode test — pas de Twilio configuré : regarde les logs du serveur pour le code.)" : ""}
+            Code envoyé {mode === "email" ? "à" : "au"} {form.phone}.{testMode ? ` (Mode test — pas de ${mode === "email" ? "SMTP" : "Twilio"} configuré : regarde les logs du serveur pour le code.)` : ""}
           </p>
-          <input placeholder="Code reçu par SMS" value={code} onChange={(e) => setCode(e.target.value)} onFocus={keepInView} className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-sm focus:outline-none" />
+          <input placeholder={mode === "email" ? "Code reçu par email" : "Code reçu par SMS"} value={code} onChange={(e) => setCode(e.target.value)} onFocus={keepInView} className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-sm focus:outline-none" />
           {error && <p className="f-body text-xs text-[#C1440E]">{error}</p>}
           <button disabled={!code || busy} onClick={verify} className="w-full disabled:opacity-30 text-[#14213D] f-display font-semibold py-3 rounded-full text-sm" style={{ backgroundColor: accentColor }}>
             {busy ? "Vérification…" : "Vérifier et entrer"}
           </button>
-          <button onClick={() => { setStep("info"); setCode(""); setError(""); }} className="w-full f-mono text-xs text-[#14213D]/40 underline">Changer de numéro</button>
+          <button onClick={() => { setStep("info"); setCode(""); setError(""); }} className="w-full f-mono text-xs text-[#14213D]/40 underline">{mode === "email" ? "Changer d'adresse" : "Changer de numéro"}</button>
         </div>
       )}
     </div>
@@ -630,7 +788,7 @@ function ChangePhoneNumber({ role, info, accentColor, onChanged }) {
   );
 }
 
-function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, registerBuyer, logoutBuyer, placeOrder, cancelOrder, showCart, setShowCart, myOrders, chooseCourierForOrder, confirmDeliveryByBuyer }) {
+function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, registerBuyer, logoutBuyer, placeOrder, cancelOrder, showCart, setShowCart, myOrders, chooseCourierForOrder, confirmDeliveryByBuyer, tip }) {
   const [category, setCategory] = useState("");
   const [view, setView] = useState("browse"); // browse | orders
 
@@ -640,6 +798,41 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
   const [payProcessing, setPayProcessing] = useState(false);
   const [payError, setPayError] = useState("");
   const [payNotice, setPayNotice] = useState("");
+  const [reportingOrderId, setReportingOrderId] = useState(null);
+  const [reportReason, setReportReason] = useState("");
+  const [reportDetails, setReportDetails] = useState("");
+  const [reportSending, setReportSending] = useState(false);
+  const [reportedIds, setReportedIds] = useState([]);
+  const [ratedIds, setRatedIds] = useState([]);
+  const [ratingDraft, setRatingDraft] = useState({}); // { [orderId_role]: stars }
+  const [ratingSending, setRatingSending] = useState(false);
+
+  async function submitOrderRating(order, rateePhone, rateeRole, stars) {
+    setRatingSending(true);
+    try {
+      await apiSend("/api/ratings", "POST", { orderId: order.id, rateePhone, rateeRole, stars }, getPhoneToken(buyerInfo.phone));
+      ratingsCache.delete(rateePhone); // pour que le nouveau score s'affiche ailleurs
+      setRatedIds((ids) => [...ids, `${order.id}_${rateeRole}`]);
+    } catch {
+      // échec silencieux, le bouton reste cliquable pour réessayer
+    }
+    setRatingSending(false);
+  }
+
+  async function submitReport(orderId) {
+    if (!reportReason) return;
+    setReportSending(true);
+    try {
+      await apiSend("/api/reports", "POST", { orderId, reason: reportReason, details: reportDetails }, getPhoneToken(buyerInfo.phone));
+      setReportedIds((ids) => [...ids, orderId]);
+      setReportingOrderId(null);
+      setReportReason("");
+      setReportDetails("");
+    } catch {
+      // Le message d'erreur reste discret ici — le formulaire réapparaît, l'acheteur peut réessayer.
+    }
+    setReportSending(false);
+  }
 
   useEffect(() => {
     if (zone && zone !== NATIONAL && !deliveryZone) setDeliveryZone(zone);
@@ -761,6 +954,12 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
         </div>
       </div>
 
+      {tip && (
+        <div className="mb-5 f-body text-sm bg-[#F2A93B]/15 text-[#14213D] border-2 border-[#F2A93B]/30 rounded-xl px-4 py-3">
+          💡 {tip}
+        </div>
+      )}
+
       {view === "browse" && (
         <>
           <div className="grid sm:grid-cols-2 gap-3 mb-5 bg-white ticket border-2 border-[#14213D]/10 p-4">
@@ -795,7 +994,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                     <div className="flex items-start justify-between gap-2">
                       <h4 className="f-display font-semibold text-[#14213D] text-sm leading-snug">{p.name}</h4>
                     </div>
-                    <p className="f-mono text-[10px] text-[#14213D]/40 mt-1">{p.vendorName} · {zoneLabel(p.zone)}</p>
+                    <p className="f-mono text-[10px] text-[#14213D]/40 mt-1 flex items-center gap-1.5">{p.vendorName} · {zoneLabel(p.zone)} <RatingBadge phone={p.vendorPhone} compact /></p>
                     <div className="flex items-center gap-2 mt-2">
                       <span className="f-mono text-[10px] text-[#14213D]/50 bg-[#14213D]/5 px-1.5 py-0.5 rounded">Stock: {p.stock ?? 0}</span>
                       <span className="f-mono text-[10px] text-[#2D6A4F] bg-[#2D6A4F]/10 px-1.5 py-0.5 rounded">🚚 {p.deliveryTime || "Non précisé"}</span>
@@ -871,8 +1070,9 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                       <div className="space-y-1.5">
                         {[...o.courierBids].sort((a, b) => a.fee - b.fee).map((b, i) => (
                           <div key={b.courierPhone} className="flex items-center justify-between bg-[#14213D]/5 rounded-lg px-2.5 py-1.5">
-                            <span className="f-body text-xs text-[#14213D]">
-                              {b.courierName} {i === 0 && <span className="f-mono text-[9px] bg-[#2D6A4F] text-white px-1.5 py-0.5 rounded-full ml-1">MEILLEUR PRIX</span>}
+                            <span className="f-body text-xs text-[#14213D] flex items-center gap-1.5">
+                              {b.courierName} {i === 0 && <span className="f-mono text-[9px] bg-[#2D6A4F] text-white px-1.5 py-0.5 rounded-full">MEILLEUR PRIX</span>}
+                              <RatingBadge phone={b.courierPhone} compact />
                             </span>
                             <div className="flex items-center gap-2">
                               <span className="f-mono text-xs font-semibold text-[#14213D]">{b.fee.toLocaleString("fr-FR")} F</span>
@@ -886,6 +1086,58 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                 </div>
               )}
               <OrderTimeline status={o.status} shippingMethod={o.shippingMethod} />
+
+              {o.status === "livree" && o.shippingMethod === "livreur" && (
+                <div className="mt-2 pt-2 border-t border-dashed border-[#14213D]/10 space-y-1.5">
+                  {[
+                    { role: "vendor", phone: o.items.find((it) => it.vendorPhone)?.vendorPhone, label: "le vendeur" },
+                    { role: "courier", phone: o.courierPhone, label: "le livreur" },
+                  ].filter((t) => t.phone).map((t) => {
+                    const key = `${o.id}_${t.role}`;
+                    const already = ratedIds.includes(key);
+                    return (
+                      <div key={t.role} className="flex items-center justify-between">
+                        <span className="f-body text-[11px] text-[#14213D]/50">Noter {t.label}</span>
+                        {already ? (
+                          <span className="f-mono text-[10px] text-[#2D6A4F]">Merci ✓</span>
+                        ) : (
+                          <div className="flex gap-0.5">
+                            {[1, 2, 3, 4, 5].map((n) => (
+                              <button key={n} disabled={ratingSending} onClick={() => submitOrderRating(o, t.phone, t.role, n)} className="text-sm leading-none px-0.5" style={{ color: n <= (ratingDraft[key] || 0) ? "#F2A93B" : "#14213D33" }} onMouseEnter={() => setRatingDraft((d) => ({ ...d, [key]: n }))}>★</button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {o.status !== "annulee" && (
+                reportedIds.includes(o.id) ? (
+                  <p className="f-mono text-[10px] text-[#14213D]/40 mt-2 pt-2 border-t border-dashed border-[#14213D]/10">✓ Signalement envoyé — le propriétaire va l'examiner.</p>
+                ) : reportingOrderId === o.id ? (
+                  <div className="mt-2 pt-2 border-t border-dashed border-[#14213D]/10 space-y-2">
+                    <select value={reportReason} onChange={(e) => setReportReason(e.target.value)} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-xs bg-white">
+                      <option value="">Choisis un motif…</option>
+                      <option value="Produit non conforme">Produit non conforme à la description</option>
+                      <option value="Jamais reçu">Commande jamais reçue</option>
+                      <option value="Vendeur injoignable">Vendeur injoignable</option>
+                      <option value="Arnaque suspectée">Arnaque suspectée</option>
+                      <option value="Autre">Autre problème</option>
+                    </select>
+                    <textarea rows={2} placeholder="Détails (facultatif)" value={reportDetails} onChange={(e) => setReportDetails(e.target.value)} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-xs" />
+                    <div className="flex gap-2">
+                      <button disabled={!reportReason || reportSending} onClick={() => submitReport(o.id)} className="flex-1 f-mono text-xs bg-[#C1440E] disabled:opacity-40 text-white py-1.5 rounded-full">
+                        {reportSending ? "Envoi…" : "Envoyer le signalement"}
+                      </button>
+                      <button onClick={() => { setReportingOrderId(null); setReportReason(""); setReportDetails(""); }} className="flex-1 f-mono text-xs bg-[#14213D]/10 text-[#14213D] py-1.5 rounded-full">Annuler</button>
+                    </div>
+                  </div>
+                ) : (
+                  <button onClick={() => setReportingOrderId(o.id)} className="f-mono text-[10px] text-[#14213D]/35 hover:text-[#C1440E] underline mt-2">Signaler un problème avec cette commande</button>
+                )
+              )}
             </div>
           ))}
         </div>
@@ -990,7 +1242,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
   );
 }
 
-function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addProduct, updateProduct, deleteProduct, orders, confirmOrder, cancelOrder, shipOrder, updateStatus, setRole, trialDays, accessFee, onPhoneChanged }) {
+function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addProduct, updateProduct, deleteProduct, orders, confirmOrder, cancelOrder, shipOrder, updateStatus, setRole, trialDays, accessFee, onPhoneChanged, tip }) {
   const [shipForm, setShipForm] = useState({}); // { [orderId]: { company, tracking } }
   const [form, setForm] = useState({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrl: "", deliveryTime: "" });
   const [editingId, setEditingId] = useState(null);
@@ -1026,9 +1278,16 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
     if (!file) return;
     if (target === "new") setUploadingImg(true); else setUploadingEditImg(true);
     try {
-      const dataUrl = await compressImage(file);
-      if (target === "new") setForm((f) => ({ ...f, imageUrl: dataUrl }));
-      else setEditForm((f) => ({ ...f, imageUrl: dataUrl }));
+      // Si Cloudinary est configuré, on préfère un vrai lien hébergé (plus léger
+      // pour la base de données et plus rapide à charger qu'une image encodée en base64).
+      let url;
+      try {
+        url = await uploadImageToCloudinary(file);
+      } catch {
+        url = await compressImage(file); // repli : image compressée et encodée directement
+      }
+      if (target === "new") setForm((f) => ({ ...f, imageUrl: url }));
+      else setEditForm((f) => ({ ...f, imageUrl: url }));
     } catch {
       // photo illisible, on laisse le champ tel quel
     }
@@ -1044,6 +1303,23 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
     const sub = o.items.filter((it) => myIds.includes(it.id)).reduce((a, it) => a + it.price * it.qty, 0);
     return s + sub * (1 - (o.feeRate ?? 0));
   }, 0);
+
+  if (vendorInfo.suspended) {
+    return (
+      <div className="max-w-sm mx-auto px-4 py-10 text-center">
+        <div className="w-11 h-11 rounded-lg bg-[#C1440E] flex items-center justify-center mb-4 mx-auto">
+          <X size={18} className="text-white" strokeWidth={2.5} />
+        </div>
+        <h2 className="f-display font-semibold text-xl text-[#14213D] mb-1">Compte suspendu</h2>
+        <p className="f-body text-sm text-[#14213D]/60 mb-2">
+          Ton espace vendeur a été suspendu par le propriétaire de la plateforme{vendorInfo.suspendedReason ? " pour ce motif :" : "."}
+        </p>
+        {vendorInfo.suspendedReason && <p className="f-body text-sm text-[#14213D] bg-[#C1440E]/10 rounded-xl px-4 py-3 mb-4">{vendorInfo.suspendedReason}</p>}
+        <p className="f-body text-xs text-[#14213D]/50">Tes produits ne sont plus visibles par les acheteurs. Contacte le propriétaire de la plateforme si tu penses qu'il s'agit d'une erreur.</p>
+        <button onClick={logoutVendor} className="mt-6 f-mono text-xs text-[#14213D]/40 underline">Changer de compte</button>
+      </div>
+    );
+  }
 
   return (
     <SubscriptionGate role="vendor" info={vendorInfo} trialDays={trialDays} accessFee={accessFee} color="#2D6A4F">
@@ -1071,6 +1347,11 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
         <p className="f-mono text-[11px] text-[#14213D]/40">{vendorInfo.phone}</p>
         <ChangePhoneNumber role="vendor" info={vendorInfo} accentColor="#2D6A4F" onChanged={onPhoneChanged} />
       </div>
+      {tip && (
+        <div className="mb-6 f-body text-sm bg-[#2D6A4F]/10 text-[#14213D] border-2 border-[#2D6A4F]/20 rounded-xl px-4 py-3">
+          💡 {tip}
+        </div>
+      )}
 
       <div className="grid grid-cols-3 gap-3 mb-6">
         <div className="ticket bg-white border-2 border-[#14213D]/10 p-3 text-center">
@@ -1268,7 +1549,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
   );
 }
 
-function CourierView({ courierInfo, registerCourier, logoutCourier, orders, submitCourierBid, updateStatus, confirmDeliveryByCourier, trialDays, accessFee, onPhoneChanged }) {
+function CourierView({ courierInfo, registerCourier, logoutCourier, orders, submitCourierBid, updateStatus, confirmDeliveryByCourier, trialDays, accessFee, onPhoneChanged, tip }) {
   const [zone, setZone] = useState("");
   const [feeInputs, setFeeInputs] = useState({}); // { [orderId]: proposedFee }
   const available = orders.filter((o) => !o.courierPhone && o.status !== "annulee" && o.status !== "livree" && o.shippingMethod !== "transport" && (!zone || o.zone === zone));
@@ -1297,6 +1578,11 @@ function CourierView({ courierInfo, registerCourier, logoutCourier, orders, subm
         <p className="f-mono text-[11px] text-[#14213D]/40">{courierInfo.phone}</p>
         <ChangePhoneNumber role="courier" info={courierInfo} accentColor="#C1440E" onChanged={onPhoneChanged} />
       </div>
+      {tip && (
+        <div className="mb-5 f-body text-sm bg-[#C1440E]/10 text-[#14213D] border-2 border-[#C1440E]/20 rounded-xl px-4 py-3">
+          💡 {tip}
+        </div>
+      )}
 
       {mine.length > 0 && (
         <>
@@ -1390,7 +1676,7 @@ function CourierView({ courierInfo, registerCourier, logoutCourier, orders, subm
   );
 }
 
-function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updateAccessSettings, ownerPayoutInfo, updateOwnerPayoutInfo, ownerToken, setOwnerToken }) {
+function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updateAccessSettings, ownerPayoutInfo, updateOwnerPayoutInfo, ownerToken, setOwnerToken, siteContent, updateContent }) {
   const [code, setCode] = useState("");
   const [rateInput, setRateInput] = useState(String(Math.round(feeRate * 100)));
   const [accessFeeInput, setAccessFeeInput] = useState(String(accessFee));
@@ -1398,6 +1684,126 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
   const [payoutInput, setPayoutInput] = useState(ownerPayoutInfo || "");
   const [error, setError] = useState("");
   const [loggingIn, setLoggingIn] = useState(false);
+
+  const [contentForm, setContentForm] = useState({
+    homeHeadline: "", homeSubheadline: "",
+    roleDescBuyer: "", roleDescVendor: "", roleDescCourier: "",
+    tipBuyer: "", tipVendor: "", tipCourier: "",
+    zonesText: "", categoriesText: "",
+  });
+  const [contentLoaded, setContentLoaded] = useState(false);
+  const [contentSaving, setContentSaving] = useState(false);
+  const [contentMsg, setContentMsg] = useState("");
+
+  // On ne remplit le formulaire qu'une seule fois, dès que le contenu arrive du
+  // serveur — sinon le rafraîchissement automatique (toutes les 2,5s) effacerait
+  // ce que le propriétaire est en train de taper.
+  useEffect(() => {
+    if (!contentLoaded && siteContent && Object.keys(siteContent).length) {
+      setContentForm({
+        homeHeadline: siteContent.homeHeadline || "",
+        homeSubheadline: siteContent.homeSubheadline || "",
+        roleDescBuyer: siteContent.roleDescBuyer || "",
+        roleDescVendor: siteContent.roleDescVendor || "",
+        roleDescCourier: siteContent.roleDescCourier || "",
+        tipBuyer: siteContent.tipBuyer || "",
+        tipVendor: siteContent.tipVendor || "",
+        tipCourier: siteContent.tipCourier || "",
+        zonesText: (siteContent.zones && siteContent.zones.length ? siteContent.zones : ZONES).join("\n"),
+        categoriesText: (siteContent.categories && siteContent.categories.length ? siteContent.categories : CATEGORIES).map((c) => `${c.emoji} ${c.name}`).join("\n"),
+      });
+      setContentLoaded(true);
+    }
+  }, [siteContent, contentLoaded]);
+
+  async function saveContent() {
+    setContentSaving(true);
+    setContentMsg("");
+    try {
+      const zones = contentForm.zonesText.split("\n").map((s) => s.trim()).filter(Boolean);
+      const categories = contentForm.categoriesText.split("\n").map((s) => s.trim()).filter(Boolean).map((line) => {
+        const [emoji, ...rest] = line.split(" ");
+        return { emoji, name: rest.join(" ") || emoji };
+      });
+      await updateContent({
+        homeHeadline: contentForm.homeHeadline,
+        homeSubheadline: contentForm.homeSubheadline,
+        roleDescBuyer: contentForm.roleDescBuyer,
+        roleDescVendor: contentForm.roleDescVendor,
+        roleDescCourier: contentForm.roleDescCourier,
+        tipBuyer: contentForm.tipBuyer,
+        tipVendor: contentForm.tipVendor,
+        tipCourier: contentForm.tipCourier,
+        zones, categories,
+      });
+      setContentMsg("Enregistré ✓ — visible pour tout le monde d'ici quelques secondes.");
+    } catch (e) {
+      setContentMsg("Erreur pendant l'enregistrement. Réessaie.");
+    }
+    setContentSaving(false);
+  }
+
+  const [vendorRisk, setVendorRisk] = useState([]);
+  const [reports, setReports] = useState([]);
+  const [riskLoading, setRiskLoading] = useState(false);
+  const [suspendReasonFor, setSuspendReasonFor] = useState(null);
+  const [suspendReasonText, setSuspendReasonText] = useState("");
+
+  async function loadRisk() {
+    setRiskLoading(true);
+    try {
+      const [risk, reps] = await Promise.all([
+        apiSend("/api/vendors/risk", "GET", undefined, ownerToken),
+        apiSend("/api/reports", "GET", undefined, ownerToken),
+      ]);
+      setVendorRisk(risk);
+      setReports(reps);
+    } catch (e) {
+      console.error("Erreur de chargement des indicateurs de sécurité:", e);
+    }
+    setRiskLoading(false);
+  }
+
+  async function suspendVendor(phone, reason) {
+    await apiSend(`/api/vendors/${encodeURIComponent(phone)}/suspend`, "POST", { reason }, ownerToken);
+    setSuspendReasonFor(null);
+    setSuspendReasonText("");
+    loadRisk();
+  }
+  async function unsuspendVendor(phone) {
+    await apiSend(`/api/vendors/${encodeURIComponent(phone)}/unsuspend`, "POST", undefined, ownerToken);
+    loadRisk();
+  }
+  async function markReviewed(reportId) {
+    await apiSend(`/api/reports/${reportId}/review`, "POST", undefined, ownerToken);
+    loadRisk();
+  }
+
+  const [couriers, setCouriers] = useState([]);
+  const [refunds, setRefunds] = useState([]);
+
+  async function loadCouriersAndRefunds() {
+    try {
+      const [c, r] = await Promise.all([
+        apiSend("/api/couriers", "GET", undefined, ownerToken),
+        apiSend("/api/refunds", "GET", undefined, ownerToken),
+      ]);
+      setCouriers(c);
+      setRefunds(r);
+    } catch (e) {
+      console.error("Erreur de chargement livreurs/remboursements:", e);
+    }
+  }
+  useEffect(() => { if (ownerToken) loadCouriersAndRefunds(); }, [ownerToken]);
+
+  async function toggleCourierVerified(phone, verified) {
+    await apiSend(`/api/couriers/${encodeURIComponent(phone)}/${verified ? "unverify" : "verify"}`, "POST", undefined, ownerToken);
+    loadCouriersAndRefunds();
+  }
+  async function markRefundDone(orderId) {
+    await apiSend(`/api/orders/${orderId}/refund-done`, "POST", undefined, ownerToken);
+    loadCouriersAndRefunds();
+  }
 
   async function login() {
     setError("");
@@ -1444,6 +1850,8 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
       </div>
     );
   }
+
+  useEffect(() => { if (ownerToken) loadRisk(); }, [ownerToken]);
 
   const activeOrders = orders.filter((o) => o.status !== "annulee");
   const gmv = activeOrders.reduce((s, o) => s + o.total, 0);
@@ -1541,6 +1949,148 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
         </p>
       </div>
 
+      <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
+        <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-3">Contenu de la plateforme</p>
+        <p className="f-body text-xs text-[#14213D]/50 mb-4">
+          Modifie les textes, les zones et les catégories directement ici — les changements sont visibles par tout le monde en quelques secondes, sans passer par GitHub ni redéployer.
+        </p>
+
+        <p className="f-mono text-[10px] uppercase tracking-wide text-[#14213D]/40 mb-1.5 mt-4">Page d'accueil</p>
+        <input placeholder="Titre principal" value={contentForm.homeHeadline} onChange={(e) => setContentForm({ ...contentForm, homeHeadline: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm mb-2" />
+        <input placeholder="Sous-titre" value={contentForm.homeSubheadline} onChange={(e) => setContentForm({ ...contentForm, homeSubheadline: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm" />
+
+        <p className="f-mono text-[10px] uppercase tracking-wide text-[#14213D]/40 mb-1.5 mt-4">Descriptions des rôles (affichées sur la page d'accueil)</p>
+        <input placeholder="Description — Acheteur" value={contentForm.roleDescBuyer} onChange={(e) => setContentForm({ ...contentForm, roleDescBuyer: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#F2A93B]/40 text-sm mb-2" />
+        <input placeholder="Description — Vendeur" value={contentForm.roleDescVendor} onChange={(e) => setContentForm({ ...contentForm, roleDescVendor: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#2D6A4F]/40 text-sm mb-2" />
+        <input placeholder="Description — Livreur" value={contentForm.roleDescCourier} onChange={(e) => setContentForm({ ...contentForm, roleDescCourier: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#C1440E]/40 text-sm" />
+
+        <p className="f-mono text-[10px] uppercase tracking-wide text-[#14213D]/40 mb-1.5 mt-4">Conseils affichés dans chaque espace (facultatif — laisse vide pour ne rien afficher)</p>
+        <input placeholder="Conseil pour les acheteurs" value={contentForm.tipBuyer} onChange={(e) => setContentForm({ ...contentForm, tipBuyer: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#F2A93B]/40 text-sm mb-2" />
+        <input placeholder="Conseil pour les vendeurs" value={contentForm.tipVendor} onChange={(e) => setContentForm({ ...contentForm, tipVendor: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#2D6A4F]/40 text-sm mb-2" />
+        <input placeholder="Conseil pour les livreurs" value={contentForm.tipCourier} onChange={(e) => setContentForm({ ...contentForm, tipCourier: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#C1440E]/40 text-sm" />
+
+        <p className="f-mono text-[10px] uppercase tracking-wide text-[#14213D]/40 mb-1.5 mt-4">Zones (une par ligne)</p>
+        <textarea rows={5} value={contentForm.zonesText} onChange={(e) => setContentForm({ ...contentForm, zonesText: e.target.value })} className="f-mono w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-xs" />
+
+        <p className="f-mono text-[10px] uppercase tracking-wide text-[#14213D]/40 mb-1.5 mt-4">Catégories de produits (une par ligne, format : emoji nom — ex : 🍚 Alimentation)</p>
+        <textarea rows={5} value={contentForm.categoriesText} onChange={(e) => setContentForm({ ...contentForm, categoriesText: e.target.value })} className="f-mono w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-xs" />
+
+        {contentMsg && <p className={`f-body text-xs mt-3 ${contentMsg.startsWith("Erreur") ? "text-[#C1440E]" : "text-[#2D6A4F]"}`}>{contentMsg}</p>}
+        <button disabled={contentSaving} onClick={saveContent} className="w-full mt-4 f-mono text-xs bg-[#14213D] disabled:opacity-40 text-white py-2.5 rounded-full">
+          {contentSaving ? "Enregistrement…" : "Enregistrer le contenu"}
+        </button>
+      </div>
+
+      <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60">Sécurité — vendeurs à surveiller</p>
+          <button onClick={loadRisk} className="f-mono text-[10px] text-[#14213D]/40 hover:text-[#14213D] underline">{riskLoading ? "Chargement…" : "Actualiser"}</button>
+        </div>
+        <p className="f-body text-xs text-[#14213D]/50 mb-4">
+          Basé sur les signalements des acheteurs et le taux d'annulation de chaque vendeur. Un vendeur suspendu voit ses produits disparaître du site pour tout le monde, immédiatement.
+        </p>
+
+        {reports.filter((r) => r.status === "open").length > 0 && (
+          <>
+            <p className="f-mono text-[10px] uppercase tracking-wide text-[#C1440E] mb-2">Signalements en attente ({reports.filter((r) => r.status === "open").length})</p>
+            <div className="space-y-2 mb-5">
+              {reports.filter((r) => r.status === "open").map((r) => (
+                <div key={r.id} className="border-2 border-[#C1440E]/20 bg-[#C1440E]/5 rounded-xl p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="f-body text-xs text-[#14213D] font-semibold">{r.reason}</span>
+                    <span className="f-mono text-[10px] text-[#14213D]/40">{new Date(r.createdAt).toLocaleDateString("fr-FR")}</span>
+                  </div>
+                  <p className="f-mono text-[10px] text-[#14213D]/50 mt-1">Vendeur : {r.vendorPhone} · Commande #{r.orderId?.slice(-6)}</p>
+                  {r.details && <p className="f-body text-xs text-[#14213D]/70 mt-1">{r.details}</p>}
+                  <div className="flex gap-2 mt-2">
+                    <button onClick={() => markReviewed(r.id)} className="f-mono text-[10px] bg-[#14213D]/10 text-[#14213D] px-3 py-1.5 rounded-full">Marquer traité</button>
+                    <button onClick={() => setSuspendReasonFor(r.vendorPhone)} className="f-mono text-[10px] bg-[#C1440E] text-white px-3 py-1.5 rounded-full">Suspendre ce vendeur</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        <p className="f-mono text-[10px] uppercase tracking-wide text-[#14213D]/40 mb-2">Tous les vendeurs ({vendorRisk.length})</p>
+        <div className="space-y-2">
+          {vendorRisk.map((v) => (
+            <div key={v.phone} className={`border-2 rounded-xl p-3 ${v.suspended ? "border-[#14213D]/10 bg-[#14213D]/5 opacity-60" : v.risky ? "border-[#C1440E]/30" : "border-[#14213D]/10"}`}>
+              <div className="flex items-center justify-between">
+                <span className="f-body text-xs font-semibold text-[#14213D]">{v.name || "Sans nom"} <span className="f-mono text-[10px] text-[#14213D]/40">· {v.phone}</span></span>
+                {v.suspended && <span className="f-mono text-[9px] bg-[#14213D] text-white px-2 py-0.5 rounded-full">SUSPENDU</span>}
+                {!v.suspended && v.risky && <span className="f-mono text-[9px] bg-[#C1440E] text-white px-2 py-0.5 rounded-full">À RISQUE</span>}
+              </div>
+              <p className="f-mono text-[10px] text-[#14213D]/50 mt-1">
+                {v.totalOrders} commande(s) · {v.cancelRate}% annulées · {v.openReports} signalement(s) ouvert(s)
+              </p>
+              {v.suspended ? (
+                <>
+                  {v.suspendedReason && <p className="f-body text-[11px] text-[#14213D]/60 mt-1">Motif : {v.suspendedReason}</p>}
+                  <button onClick={() => unsuspendVendor(v.phone)} className="f-mono text-[10px] bg-[#2D6A4F] text-white px-3 py-1.5 rounded-full mt-2">Lever la suspension</button>
+                </>
+              ) : suspendReasonFor === v.phone ? (
+                <div className="mt-2 space-y-2">
+                  <input placeholder="Motif de la suspension (visible par le vendeur)" value={suspendReasonText} onChange={(e) => setSuspendReasonText(e.target.value)} className="f-body w-full px-3 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
+                  <div className="flex gap-2">
+                    <button onClick={() => suspendVendor(v.phone, suspendReasonText)} className="flex-1 f-mono text-[10px] bg-[#C1440E] text-white py-1.5 rounded-full">Confirmer la suspension</button>
+                    <button onClick={() => { setSuspendReasonFor(null); setSuspendReasonText(""); }} className="flex-1 f-mono text-[10px] bg-[#14213D]/10 text-[#14213D] py-1.5 rounded-full">Annuler</button>
+                  </div>
+                </div>
+              ) : (
+                <button onClick={() => setSuspendReasonFor(v.phone)} className="f-mono text-[10px] bg-[#14213D]/10 text-[#14213D] px-3 py-1.5 rounded-full mt-2">Suspendre</button>
+              )}
+            </div>
+          ))}
+          {vendorRisk.length === 0 && !riskLoading && <p className="f-body text-xs text-[#14213D]/40">Aucun vendeur inscrit pour l'instant.</p>}
+        </div>
+      </div>
+
+      {refunds.length > 0 && (
+        <div className="ticket bg-white border-2 border-[#C1440E]/20 p-4 mb-6">
+          <p className="f-mono text-[11px] uppercase tracking-wide text-[#C1440E] mb-2">Remboursements à traiter ({refunds.filter((r) => r.refundStatus === "pending").length})</p>
+          <p className="f-body text-xs text-[#14213D]/50 mb-3">
+            CinetPay n'a pas d'API de remboursement automatique — traite ces demandes depuis ton espace CinetPay (Transactions → rembourser), puis marque-les "fait" ici.
+          </p>
+          <div className="space-y-2">
+            {refunds.map((r) => (
+              <div key={r.id} className={`flex items-center justify-between rounded-xl px-3 py-2 ${r.refundStatus === "pending" ? "bg-[#C1440E]/5" : "bg-[#14213D]/5 opacity-50"}`}>
+                <div>
+                  <p className="f-body text-xs text-[#14213D]">#{r.id.slice(-6)} · {r.total.toLocaleString("fr-FR")} F · {r.buyerPhone}</p>
+                  <p className="f-mono text-[10px] text-[#14213D]/40">Transaction : {r.cinetpayTransactionId || "—"}</p>
+                </div>
+                {r.refundStatus === "pending" ? (
+                  <button onClick={() => markRefundDone(r.id)} className="f-mono text-[10px] bg-[#2D6A4F] text-white px-3 py-1.5 rounded-full">Marquer remboursé</button>
+                ) : (
+                  <span className="f-mono text-[10px] text-[#2D6A4F]">✓ Fait</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
+        <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-2">Vérification des livreurs ({couriers.length})</p>
+        <p className="f-body text-xs text-[#14213D]/50 mb-3">
+          Vérifie l'identité d'un livreur (ex : pièce d'identité envoyée par WhatsApp), puis coche-le ici — un badge de confiance apparaît alors pour les acheteurs quand ils comparent les propositions de prix.
+        </p>
+        <div className="space-y-2">
+          {couriers.map((c) => (
+            <div key={c.phone} className="flex items-center justify-between rounded-xl px-3 py-2 bg-[#14213D]/5">
+              <div>
+                <p className="f-body text-xs text-[#14213D] font-semibold">{c.name || "Sans nom"} <span className="f-mono text-[10px] text-[#14213D]/40">· {c.phone}</span></p>
+                <RatingBadge phone={c.phone} />
+              </div>
+              <button onClick={() => toggleCourierVerified(c.phone, c.verified)} className={`f-mono text-[10px] px-3 py-1.5 rounded-full ${c.verified ? "bg-[#2D6A4F] text-white" : "bg-[#14213D]/10 text-[#14213D]"}`}>
+                {c.verified ? "✓ Vérifié" : "Marquer vérifié"}
+              </button>
+            </div>
+          ))}
+          {couriers.length === 0 && <p className="f-body text-xs text-[#14213D]/40">Aucun livreur inscrit pour l'instant.</p>}
+        </div>
+      </div>
+
       <h3 className="f-display font-semibold text-sm text-[#14213D] mb-3">Détail des commandes ({orders.length})</h3>
       <div className="space-y-2">
         {[...orders].reverse().map((o) => {
@@ -1563,6 +2113,7 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
 
 function App() {
   const [role, setRole] = useState("home");
+  const [showLegal, setShowLegal] = useState(false);
   const [products, setProducts] = useState([]);
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1576,18 +2127,31 @@ function App() {
   const [accessFee, setAccessFee] = useState(DEFAULT_ACCESS_FEE);
   const [trialDays, setTrialDays] = useState(DEFAULT_TRIAL_DAYS);
   const [ownerPayoutInfo, setOwnerPayoutInfo] = useState("");
+  const [siteContent, setSiteContent] = useState({});
 
   const [ownerToken, setOwnerToken] = useState(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [p, o, s] = await Promise.all([apiGet("/api/products"), apiGet("/api/orders"), apiGet("/api/settings")]);
+      const [p, o, s, c] = await Promise.all([apiGet("/api/products"), apiGet("/api/orders"), apiGet("/api/settings"), apiGet("/api/content")]);
       setProducts(p);
       setOrders(o);
       setFeeRate(s.feeRate ?? DEFAULT_FEE_RATE);
       setAccessFee(s.accessFee ?? DEFAULT_ACCESS_FEE);
       setTrialDays(s.trialDays ?? DEFAULT_TRIAL_DAYS);
       setOwnerPayoutInfo(s.ownerPayoutInfo ?? "");
+      setSiteContent(c || {});
+      // Zones et catégories : si le propriétaire les a personnalisées, elles
+      // remplacent les listes par défaut partout dans l'appli (menus déroulants,
+      // filtres...) sans qu'il soit besoin de modifier le code.
+      if (Array.isArray(c?.zones) && c.zones.length) {
+        ZONES.length = 0;
+        ZONES.push(...c.zones);
+      }
+      if (Array.isArray(c?.categories) && c.categories.length) {
+        CATEGORIES.length = 0;
+        CATEGORIES.push(...c.categories);
+      }
     } catch (e) {
       console.error("Erreur de rafraîchissement depuis le serveur:", e);
     }
@@ -1687,6 +2251,15 @@ function App() {
     const s = await apiSend("/api/settings", "PUT", { ownerPayoutInfo: info }, ownerToken);
     setOwnerPayoutInfo(s.ownerPayoutInfo);
   }
+  // Met à jour les textes/zones/catégories de la plateforme — se répercute
+  // immédiatement (au prochain rafraîchissement) pour tous les utilisateurs,
+  // sans redéploiement.
+  async function updateContent(partial) {
+    const c = await apiSend("/api/content", "PUT", partial, ownerToken);
+    setSiteContent(c);
+    if (Array.isArray(c.zones) && c.zones.length) { ZONES.length = 0; ZONES.push(...c.zones); }
+    if (Array.isArray(c.categories) && c.categories.length) { CATEGORIES.length = 0; CATEGORIES.push(...c.categories); }
+  }
 
   useEffect(() => { refresh(); }, [refresh]);
   useEffect(() => {
@@ -1781,12 +2354,13 @@ function App() {
   return (
     <div className="min-h-screen bg-[#FBF7F0]" style={{ fontFamily: "Inter, sans-serif" }}>
       <style>{FONT_STYLE}</style>
+      {showLegal && <LegalPage onClose={() => setShowLegal(false)} />}
       <TopBar role={role} setRole={setRole} cartCount={cart.reduce((s, i) => s + i.qty, 0)} onCartClick={() => setShowCart(true)} />
       {loading ? (
         <div className="text-center py-24 f-body text-sm text-[#14213D]/40">Chargement…</div>
       ) : (
         <>
-          {role === "home" && <Home setRole={setRole} />}
+          {role === "home" && <Home setRole={setRole} content={siteContent} />}
           {role === "buyer" && (
             <BuyerView
               products={products} zone={zone} setZone={setZone}
@@ -1794,6 +2368,7 @@ function App() {
               buyerInfo={buyerInfo} registerBuyer={registerBuyer} logoutBuyer={logoutBuyer}
               placeOrder={placeOrder} cancelOrder={cancelOrder} showCart={showCart} setShowCart={setShowCart}
               myOrders={myOrders} chooseCourierForOrder={chooseCourierForOrder} confirmDeliveryByBuyer={confirmDeliveryByBuyer}
+              tip={siteContent.tipBuyer}
             />
           )}
           {role === "vendor" && (
@@ -1802,19 +2377,26 @@ function App() {
               products={products} addProduct={addProduct} updateProduct={updateProduct} deleteProduct={deleteProduct}
               orders={orders} confirmOrder={confirmOrder} cancelOrder={cancelOrder} shipOrder={shipOrder} updateStatus={updateStatus} setRole={setRole}
               trialDays={trialDays} accessFee={accessFee} onPhoneChanged={(profile) => applyChangedPhone("vendor", profile)}
+              tip={siteContent.tipVendor}
             />
           )}
           {role === "courier" && (
             <CourierView
               courierInfo={courierInfo} registerCourier={registerCourier} logoutCourier={logoutCourier} orders={orders} submitCourierBid={submitCourierBid} updateStatus={updateStatus} confirmDeliveryByCourier={confirmDeliveryByCourier}
               trialDays={trialDays} accessFee={accessFee} onPhoneChanged={(profile) => applyChangedPhone("courier", profile)}
+              tip={siteContent.tipCourier}
             />
           )}
           {role === "owner" && (
-            <OwnerView orders={orders} feeRate={feeRate} updateFeeRate={updateFeeRate} accessFee={accessFee} trialDays={trialDays} updateAccessSettings={updateAccessSettings} ownerPayoutInfo={ownerPayoutInfo} updateOwnerPayoutInfo={updateOwnerPayoutInfo} ownerToken={ownerToken} setOwnerToken={setOwnerToken} />
+            <OwnerView orders={orders} feeRate={feeRate} updateFeeRate={updateFeeRate} accessFee={accessFee} trialDays={trialDays} updateAccessSettings={updateAccessSettings} ownerPayoutInfo={ownerPayoutInfo} updateOwnerPayoutInfo={updateOwnerPayoutInfo} ownerToken={ownerToken} setOwnerToken={setOwnerToken} siteContent={siteContent} updateContent={updateContent} />
           )}
         </>
       )}
+      <footer className="max-w-5xl mx-auto px-4 py-8 text-center">
+        <button onClick={() => setShowLegal(true)} className="f-mono text-[11px] text-[#14213D]/35 hover:text-[#14213D] underline">
+          Mentions légales · CGU · Confidentialité
+        </button>
+      </footer>
     </div>
   );
 }
