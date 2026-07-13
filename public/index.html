@@ -1817,6 +1817,11 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
     setLoggingIn(false);
   }
 
+  // Ce useEffect doit rester avant tout "return" conditionnel : les Hooks React
+  // doivent toujours être appelés dans le même ordre à chaque rendu, sinon on
+  // obtient l'erreur #310 (c'était le bug qui rendait cet écran blanc).
+  useEffect(() => { if (ownerToken) loadRisk(); }, [ownerToken]);
+
   // Le code d'accès vit uniquement dans la variable d'environnement OWNER_PASSCODE
   // du serveur — jamais dans ce fichier ni dans le navigateur. C'est le serveur qui
   // vérifie le code et délivre un jeton temporaire (12h) pour les actions protégées.
@@ -1850,8 +1855,6 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
       </div>
     );
   }
-
-  useEffect(() => { if (ownerToken) loadRisk(); }, [ownerToken]);
 
   const activeOrders = orders.filter((o) => o.status !== "annulee");
   const gmv = activeOrders.reduce((s, o) => s + o.total, 0);
