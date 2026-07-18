@@ -7,7 +7,6 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const { Pool } = require("pg");
-const nodemailer = require("nodemailer");
 
 const app = express();
 app.use(express.json());
@@ -38,28 +37,31 @@ if (!TWILIO_CONFIGURED) {
 }
 
 // Connexion par email (en plus du téléphone) — envoie un code par email via
-// SMTP. Fonctionne avec Gmail (mot de passe d'application), ou n'importe quel
-// fournisseur SMTP classique. Facultatif : sans réglage, les codes email
-// s'affichent dans les logs du serveur, comme pour les SMS.
-const SMTP_HOST = process.env.SMTP_HOST || "";
-const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
-const SMTP_USER = process.env.SMTP_USER || "";
-const SMTP_PASS = process.env.SMTP_PASS || "";
-const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER;
-const SMTP_CONFIGURED = SMTP_HOST && SMTP_USER && SMTP_PASS;
-if (!SMTP_CONFIGURED) {
-  console.warn("⚠️  SMTP non configuré — les codes envoyés par email s'afficheront dans les logs du serveur (mode test).");
+// l'API HTTP de Brevo (pas le SMTP classique : Render bloque les ports SMTP
+// 25/465/587 sur le plan gratuit depuis septembre 2025, l'API HTTP passe par
+// le port 443 comme n'importe quel site web, donc pas de souci). Facultatif :
+// sans réglage, les codes email s'affichent dans les logs du serveur.
+const BREVO_API_KEY = process.env.BREVO_API_KEY || "";
+const BREVO_FROM_EMAIL = process.env.BREVO_FROM_EMAIL || "";
+const EMAIL_CONFIGURED = BREVO_API_KEY && BREVO_FROM_EMAIL;
+if (!EMAIL_CONFIGURED) {
+  console.warn("⚠️  Brevo non configuré (BREVO_API_KEY/BREVO_FROM_EMAIL) — les codes envoyés par email s'afficheront dans les logs du serveur (mode test).");
 }
-const mailTransporter = SMTP_CONFIGURED
-  ? nodemailer.createTransport({ host: SMTP_HOST, port: SMTP_PORT, secure: SMTP_PORT === 465, auth: { user: SMTP_USER, pass: SMTP_PASS } })
-  : null;
 async function sendEmailCode(email, code) {
-  await mailTransporter.sendMail({
-    from: SMTP_FROM,
-    to: email,
-    subject: "Ton code de vérification Zonako",
-    text: `Ton code de vérification Zonako est : ${code}\n\nIl est valable 10 minutes.`,
+  const r = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "api-key": BREVO_API_KEY },
+    body: JSON.stringify({
+      sender: { email: BREVO_FROM_EMAIL, name: "Zonako" },
+      to: [{ email }],
+      subject: "Ton code de vérification Zonako",
+      textContent: `Ton code de vérification Zonako est : ${code}\n\nIl est valable 10 minutes.`,
+    }),
   });
+  if (!r.ok) {
+    const detail = await r.text().catch(() => "");
+    throw new Error(`Brevo a répondu ${r.status} : ${detail}`);
+  }
 }
 
 const pool = new Pool({
@@ -274,13 +276,13 @@ app.post("/api/auth/send-code", async (req, res) => {
          ON CONFLICT (phone) DO UPDATE SET code = $2, expires_at = $3, attempts = 0`,
         [phone, code, Date.now() + 10 * 60 * 1000]
       );
-      if (SMTP_CONFIGURED) {
+      if (EMAIL_CONFIGURED) {
         await sendEmailCode(phone, code);
       } else {
-        console.log(`[MODE TEST — pas de SMTP configuré] Code de vérification pour ${phone} : ${code}`);
+        console.log(`[MODE TEST — pas de Brevo configuré] Code de vérification pour ${phone} : ${code}`);
       }
       recordOtpAttempt(phone);
-      return res.json({ ok: true, testMode: !SMTP_CONFIGURED });
+      return res.json({ ok: true, testMode: !EMAIL_CONFIGURED });
     }
     if (TWILIO_CONFIGURED) {
       await twilioSendCode(phone);
