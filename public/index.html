@@ -17,7 +17,7 @@
 <div id="root"></div>
 <script type="text/babel" data-presets="react">
 
-    const { useState, useEffect, useCallback } = React;
+    const { useState, useEffect, useCallback, useRef } = React;
 
     // Icônes légères en émoji (évite toute dépendance à un bundler pour ce fichier autonome)
     function makeIcon(emoji) {
@@ -116,6 +116,12 @@ const FONT_STYLE = `
   .f-mono { font-family: 'IBM Plex Mono', monospace; }
   .ticket {
     clip-path: polygon(0% 8px, 4px 0%, calc(100% - 4px) 0%, 100% 8px, 100% calc(100% - 8px), calc(100% - 4px) 100%, 4px 100%, 0% calc(100% - 8px));
+  }
+  @media print {
+    body * { visibility: hidden; }
+    .receipt-print, .receipt-print * { visibility: visible; }
+    .receipt-print { position: absolute; top: 0; left: 0; width: 100%; }
+    .no-print { display: none !important; }
   }
 `;
 
@@ -218,9 +224,12 @@ function launchCinetPaySubscription({ transactionId, amount, description, custom
 function getAccessState(info, trialDays) {
   const trialStartedAt = info.trialStartedAt || Date.now();
   const daysUsed = Math.floor((Date.now() - trialStartedAt) / 86400000);
-  const daysLeft = Math.max(0, trialDays - daysUsed);
+  const trialDaysLeft = Math.max(0, trialDays - daysUsed);
   const subscriptionActive = info.subscriptionStatus === "active" && info.subscriptionExpiresAt && info.subscriptionExpiresAt > Date.now();
-  const trialActive = !subscriptionActive && daysLeft > 0;
+  const trialActive = !subscriptionActive && trialDaysLeft > 0;
+  // daysLeft reflète toujours la période qui compte réellement (essai OU abonnement payant actif).
+  const subDaysLeft = subscriptionActive ? Math.ceil((info.subscriptionExpiresAt - Date.now()) / 86400000) : 0;
+  const daysLeft = subscriptionActive ? subDaysLeft : trialDaysLeft;
   return { subscriptionActive, trialActive, daysLeft, granted: subscriptionActive || trialActive };
 }
 
@@ -281,6 +290,9 @@ function SubscriptionGate({ role, info, trialDays, accessFee, color, children })
         >
           {paying ? "Paiement en cours…" : `Payer ${accessFee.toLocaleString("fr-FR")} F et activer`}
         </button>
+        <div className="flex justify-center mt-3">
+          <PaymentBadges />
+        </div>
       </div>
     );
   }
@@ -289,15 +301,25 @@ function SubscriptionGate({ role, info, trialDays, accessFee, color, children })
     <>
       {trialActive && (
         <div className="max-w-5xl mx-auto px-4 pt-4">
-          <div className="f-mono text-xs bg-[#F2A93B]/15 text-[#14213D] px-3 py-2 rounded-lg flex items-center justify-between gap-2">
-            <span>🎁 Essai gratuit : encore {daysLeft} jour{daysLeft > 1 ? "s" : ""}</span>
+          <div className={`f-mono text-xs px-3 py-2 rounded-lg flex items-center justify-between gap-2 ${daysLeft <= 3 ? "bg-[#C1440E]/15 text-[#C1440E]" : "bg-[#F2A93B]/15 text-[#14213D]"}`}>
+            <span>{daysLeft <= 3 ? "⚠️" : "🎁"} Essai gratuit : encore {daysLeft} jour{daysLeft > 1 ? "s" : ""}{daysLeft <= 3 && role === "courier" ? " — tu ne peux plus accepter de nouvelles livraisons jusqu'au renouvellement" : ""}</span>
             <button onClick={pay} disabled={paying} className="f-mono underline whitespace-nowrap">{paying ? "…" : "Payer maintenant"}</button>
           </div>
           {payError && <p className="f-body text-xs text-[#C1440E] px-1 mt-1">{payError}</p>}
           {payNotice && <p className="f-body text-xs text-[#2D6A4F] px-1 mt-1">{payNotice}</p>}
         </div>
       )}
-      {subscriptionActive && (
+      {subscriptionActive && daysLeft <= 3 && (
+        <div className="max-w-5xl mx-auto px-4 pt-4">
+          <div className="f-mono text-xs bg-[#C1440E]/15 text-[#C1440E] px-3 py-2 rounded-lg flex items-center justify-between gap-2">
+            <span>⚠️ Ton abonnement expire dans {daysLeft} jour{daysLeft > 1 ? "s" : ""}{role === "courier" ? " — tu ne peux plus accepter de nouvelles livraisons jusqu'au renouvellement" : ""}</span>
+            <button onClick={pay} disabled={paying} className="f-mono underline whitespace-nowrap">{paying ? "…" : "Renouveler maintenant"}</button>
+          </div>
+          {payError && <p className="f-body text-xs text-[#C1440E] px-1 mt-1">{payError}</p>}
+          {payNotice && <p className="f-body text-xs text-[#2D6A4F] px-1 mt-1">{payNotice}</p>}
+        </div>
+      )}
+      {subscriptionActive && daysLeft > 3 && (
         <div className="max-w-5xl mx-auto px-4 pt-4">
           <p className="f-mono text-[10px] text-[#2D6A4F]">✓ Abonnement actif jusqu'au {new Date(info.subscriptionExpiresAt).toLocaleDateString("fr-FR")}</p>
         </div>
@@ -358,6 +380,121 @@ function RatingBadge({ phone, compact = false }) {
   }, [phone]);
   if (!rating || rating.count === 0) return compact ? null : <span className="f-mono text-[10px] text-[#14213D]/30">Pas encore noté</span>;
   return <span className="f-mono text-[10px] text-[#14213D]/60">★ {rating.average} ({rating.count})</span>;
+}
+
+// Reçu imprimable pour une commande — s'ouvre en superposition, le contenu de
+// la classe "receipt-print" est le seul élément visible à l'impression (voir
+// les règles @media print dans FONT_STYLE).
+// Carte de suivi + infos du livreur — utilisée à la fois côté acheteur et côté
+// vendeur. La carte (OpenStreetMap, sans clé requise) ne s'affiche que si le
+// livreur a lui-même activé le partage de position.
+const VEHICLE_LABELS = { moto: "🏍️ Moto", velo: "🚲 Vélo", voiture: "🚗 Voiture", tricycle: "🛺 Tricycle", pied: "🚶 À pied" };
+function CourierTrackingCard({ order }) {
+  if (!order.courierPhone) return null;
+  const hasLocation = order.courierLat != null && order.courierLng != null;
+  const ageMin = order.locationUpdatedAt ? Math.round((Date.now() - order.locationUpdatedAt) / 60000) : null;
+  const stale = ageMin !== null && ageMin > 10;
+  return (
+    <div className="ticket bg-white border-2 border-[#14213D]/10 p-3 mt-2">
+      <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-1.5">Livreur</p>
+      <p className="f-body text-sm text-[#14213D]">{order.courierName} · {order.courierPhone}</p>
+      {order.courierVehicleType && (
+        <p className="f-body text-xs text-[#14213D]/60">
+          {VEHICLE_LABELS[order.courierVehicleType] || order.courierVehicleType}{order.courierVehiclePlate ? ` · ${order.courierVehiclePlate}` : ""}
+        </p>
+      )}
+      {order.status === "en_livraison" && (
+        hasLocation ? (
+          <div className="mt-2">
+            <iframe
+              title="Position du livreur"
+              className="w-full h-48 rounded-lg border-2 border-[#14213D]/10"
+              src={`https://www.openstreetmap.org/export/embed.html?bbox=${order.courierLng - 0.01}%2C${order.courierLat - 0.01}%2C${order.courierLng + 0.01}%2C${order.courierLat + 0.01}&layer=mapnik&marker=${order.courierLat}%2C${order.courierLng}`}
+            />
+            <p className={`f-mono text-[10px] mt-1 ${stale ? "text-[#C1440E]" : "text-[#14213D]/40"}`}>
+              {stale ? "⚠️ Position pas très récente — " : ""}Mise à jour il y a {ageMin} min
+            </p>
+          </div>
+        ) : (
+          <p className="f-body text-xs text-[#14213D]/40 mt-2">📍 Le livreur n'a pas encore activé le partage de position en direct.</p>
+        )
+      )}
+    </div>
+  );
+}
+
+function ReceiptModal({ order, vendorName, vendorPhone, onClose }) {
+  const myItems = order.items.filter((it) => it.vendorPhone === vendorPhone);
+  const subtotal = myItems.reduce((s, it) => s + it.price * it.qty, 0);
+  const commission = subtotal * (order.feeRate ?? 0);
+  const net = subtotal - commission;
+  return (
+    <div className="fixed inset-0 bg-[#14213D]/60 z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl max-w-sm w-full max-h-[90vh] overflow-y-auto">
+        <div className="receipt-print p-6">
+          <div className="text-center mb-4">
+            <p className="f-display font-bold text-lg text-[#14213D]">Zonako</p>
+            <p className="f-mono text-[10px] text-[#14213D]/50">Reçu de commande</p>
+          </div>
+          <div className="border-t border-b border-dashed border-[#14213D]/20 py-3 mb-3 space-y-1">
+            <p className="f-mono text-[11px] text-[#14213D]/60">N° commande : #{order.id.slice(-6)}</p>
+            <p className="f-mono text-[11px] text-[#14213D]/60">Date : {new Date(order.createdAt).toLocaleString("fr-FR")}</p>
+            <p className="f-mono text-[11px] text-[#14213D]/60">Vendeur : {vendorName}</p>
+            <p className="f-mono text-[11px] text-[#14213D]/60">Acheteur : {order.buyerName} · {order.buyerPhone}</p>
+            <p className="f-mono text-[11px] text-[#14213D]/60">Zone de livraison : {order.zone}</p>
+          </div>
+          <table className="w-full text-sm mb-3">
+            <thead>
+              <tr className="f-mono text-[10px] uppercase text-[#14213D]/40 text-left">
+                <th className="pb-1">Article</th>
+                <th className="pb-1 text-center">Qté</th>
+                <th className="pb-1 text-right">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {myItems.map((it) => (
+                <tr key={it.id} className="f-body text-[#14213D]">
+                  <td className="py-0.5">{it.name}</td>
+                  <td className="py-0.5 text-center">{it.qty}</td>
+                  <td className="py-0.5 text-right">{(it.price * it.qty).toLocaleString("fr-FR")} F</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="border-t border-dashed border-[#14213D]/20 pt-3 space-y-1">
+            <div className="flex justify-between f-body text-sm text-[#14213D]"><span>Sous-total</span><span>{subtotal.toLocaleString("fr-FR")} F</span></div>
+            <div className="flex justify-between f-body text-xs text-[#14213D]/50"><span>Commission Zonako ({Math.round((order.feeRate ?? 0) * 100)}%)</span><span>-{Math.round(commission).toLocaleString("fr-FR")} F</span></div>
+            <div className="flex justify-between f-display font-semibold text-base text-[#2D6A4F] pt-1"><span>Net vendeur</span><span>{Math.round(net).toLocaleString("fr-FR")} F</span></div>
+          </div>
+          <p className="f-mono text-[9px] text-[#14213D]/30 text-center mt-4">Merci pour votre confiance — Zonako</p>
+        </div>
+        <div className="no-print flex gap-2 p-4 pt-0">
+          <button onClick={() => window.print()} className="flex-1 f-mono text-xs bg-[#14213D] text-white py-2.5 rounded-full">🖨️ Imprimer</button>
+          <button onClick={onClose} className="flex-1 f-mono text-xs bg-[#14213D]/10 text-[#14213D] py-2.5 rounded-full">Fermer</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Badges des opérateurs de paiement mobile acceptés (via CinetPay) — couleurs
+// reconnaissables plutôt que les logos officiels (marques déposées).
+function PaymentBadges() {
+  const ops = [
+    { name: "Wave", bg: "#1AA7EC", text: "#fff" },
+    { name: "Orange Money", bg: "#FF7900", text: "#fff" },
+    { name: "MTN Money", bg: "#FFCB05", text: "#14213D" },
+    { name: "Moov Money", bg: "#003DA5", text: "#fff" },
+  ];
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {ops.map((o) => (
+        <span key={o.name} className="f-mono text-[9px] font-semibold px-2 py-1 rounded-md" style={{ backgroundColor: o.bg, color: o.text }}>
+          {o.name}
+        </span>
+      ))}
+    </div>
+  );
 }
 
 function StatusBadge({ status }) {
@@ -493,14 +630,11 @@ function LegalPage({ onClose }) {
             <p className="f-body text-xs text-[#14213D]/40 italic">Éditeur, hébergement et directeur de publication : informations à compléter par le propriétaire de la plateforme.</p>
             <div>
               <h3 className="f-display font-semibold text-[#14213D] mb-1">Éditeur de la plateforme</h3>
-              <p>Zonako — Kobenan Pascal Yao. Contact : zonakokobenan@gmail.com — +225 07 69 57 48 99.</p>
+              <p>Zonako — [Nom de l'éditeur à compléter]. Contact : [à compléter].</p>
             </div>
             <div>
               <h3 className="f-display font-semibold text-[#14213D] mb-1">Hébergement</h3>
-              <p> Ce site est hébergé par Render Services, Inc. (render.com), et utilise 
-les services de paiement CinetPay (cinetpay.com), de vérification par 
-email via Brevo (brevo.com) et de vérification par SMS Twilio Inc. 
-(twilio.com).</p>
+              <p>Ce site est hébergé par Render Services, Inc. (render.com), et utilise les services de paiement CinetPay (cinetpay.com) et de vérification par SMS Twilio Inc. (twilio.com).</p>
             </div>
           </div>
         )}
@@ -513,7 +647,7 @@ email via Brevo (brevo.com) et de vérification par SMS Twilio Inc.
             </div>
             <div>
               <h3 className="f-display font-semibold text-[#14213D] mb-1">2. Inscription et vérification</h3>
-              <p> L'inscription nécessite un numéro de téléphone vérifié par SMS ou une adresse email vérifiée. Chaque utilisateur est responsable de la confidentialité de son accès. Toute utilisation frauduleuse peut entraîner la suspension du compte.</p>
+              <p>L'inscription nécessite un numéro de téléphone vérifié par SMS. Chaque utilisateur est responsable de la confidentialité de son accès. Toute utilisation frauduleuse peut entraîner la suspension du compte.</p>
             </div>
             <div>
               <h3 className="f-display font-semibold text-[#14213D] mb-1">3. Obligations du vendeur</h3>
@@ -554,7 +688,7 @@ email via Brevo (brevo.com) et de vérification par SMS Twilio Inc.
           <div className="f-body text-sm text-[#14213D]/80 space-y-4 leading-relaxed">
             <div>
               <h3 className="f-display font-semibold text-[#14213D] mb-1">Données collectées</h3>
-              <p>Nom et numéro de téléphone (vérifié par SMS avec un code) ou nom et email (vérifié par code de confirmation). pour les acheteurs, vendeurs et livreurs ; historique de commandes et zones de livraison. Aucune donnée bancaire n'est stockée par Zonako — elle transite uniquement par CinetPay.</p>
+              <p>Nom et numéro de téléphone (vérifié par SMS) pour les acheteurs, vendeurs et livreurs ; historique de commandes et zones de livraison. Aucune donnée bancaire n'est stockée par Zonako — elle transite uniquement par CinetPay.</p>
             </div>
             <div>
               <h3 className="f-display font-semibold text-[#14213D] mb-1">Pourquoi ces données</h3>
@@ -793,6 +927,8 @@ function ChangePhoneNumber({ role, info, accentColor, onChanged }) {
 
 function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, registerBuyer, logoutBuyer, placeOrder, cancelOrder, showCart, setShowCart, myOrders, chooseCourierForOrder, confirmDeliveryByBuyer, tip }) {
   const [category, setCategory] = useState("");
+  const [search, setSearch] = useState("");
+  const [visibleCount, setVisibleCount] = useState(20);
   const [view, setView] = useState("browse"); // browse | orders
 
   const [deliveryZone, setDeliveryZone] = useState("");
@@ -843,8 +979,11 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
 
   const filtered = products.filter((p) => {
     const zoneMatch = !zone || zone === NATIONAL || p.zone === zone || p.zone === NATIONAL;
-    return zoneMatch && (!category || p.category === category);
+    const q = search.trim().toLowerCase();
+    const searchMatch = !q || p.name.toLowerCase().includes(q) || (p.description || "").toLowerCase().includes(q) || p.vendorName.toLowerCase().includes(q);
+    return zoneMatch && (!category || p.category === category) && searchMatch;
   });
+  const visibleProducts = filtered.slice(0, visibleCount);
 
   if (!buyerInfo.registered) {
     return (
@@ -861,7 +1000,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
     setCart((c) => {
       const existing = c.find((i) => i.id === p.id);
       if (existing) return c.map((i) => (i.id === p.id ? { ...i, qty: i.qty + 1 } : i));
-      return [...c, { id: p.id, name: p.name, price: p.price, qty: 1, vendorName: p.vendorName, vendorPhone: p.vendorPhone, zone: p.zone, deliveryTime: p.deliveryTime }];
+      return [...c, { id: p.id, name: p.name, price: p.price, qty: 1, vendorName: p.vendorName, vendorPhone: p.vendorPhone, zone: p.zone, deliveryTime: p.deliveryTime, vendorLandmark: p.vendorLandmark || "" }];
     });
   }
   function changeQty(id, delta) {
@@ -938,7 +1077,8 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
 
   function handleCheckout() {
     if (paymentMethod === "cod") {
-      placeOrder(total, 0, deliveryZone, { paymentMethod: "cod" }, shippingMethod);
+      setPayProcessing(true);
+      placeOrder(total, 0, deliveryZone, { paymentMethod: "cod" }, shippingMethod).finally(() => setPayProcessing(false));
     } else {
       launchCinetPayCheckout();
     }
@@ -965,11 +1105,17 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
 
       {view === "browse" && (
         <>
+          <input
+            placeholder="🔍 Rechercher un produit, une marque, un vendeur…"
+            value={search}
+            onChange={(e) => { setSearch(e.target.value); setVisibleCount(20); }}
+            className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-sm mb-3 focus:outline-none focus:border-[#F2A93B]"
+          />
           <div className="grid sm:grid-cols-2 gap-3 mb-5 bg-white ticket border-2 border-[#14213D]/10 p-4">
             <ZonePicker value={zone} onChange={setZone} allowNational />
             <div>
               <label className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 block mb-1.5">Catégorie</label>
-              <select value={category} onChange={(e) => setCategory(e.target.value)} className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-[#14213D] text-sm focus:outline-none focus:border-[#F2A93B]">
+              <select value={category} onChange={(e) => { setCategory(e.target.value); setVisibleCount(20); }} className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-[#14213D] text-sm focus:outline-none focus:border-[#F2A93B]">
                 <option value="">Toutes</option>
                 {CATEGORIES.map((c) => <option key={c.name} value={c.name}>{c.emoji} {c.name}</option>)}
               </select>
@@ -984,7 +1130,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
           )}
 
           <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {filtered.map((p) => {
+            {visibleProducts.map((p) => {
               const cat = CATEGORIES.find((c) => c.name === p.category);
               return (
                 <div key={p.id} className="ticket bg-white border-2 border-[#14213D]/10 overflow-hidden flex flex-col">
@@ -998,6 +1144,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                       <h4 className="f-display font-semibold text-[#14213D] text-sm leading-snug">{p.name}</h4>
                     </div>
                     <p className="f-mono text-[10px] text-[#14213D]/40 mt-1 flex items-center gap-1.5">{p.vendorName} · {zoneLabel(p.zone)} <RatingBadge phone={p.vendorPhone} compact /></p>
+                    {p.description && <p className="f-body text-[11px] text-[#14213D]/50 mt-1 line-clamp-2">{p.description}</p>}
                     <div className="flex items-center gap-2 mt-2">
                       <span className="f-mono text-[10px] text-[#14213D]/50 bg-[#14213D]/5 px-1.5 py-0.5 rounded">Stock: {p.stock ?? 0}</span>
                       <span className="f-mono text-[10px] text-[#2D6A4F] bg-[#2D6A4F]/10 px-1.5 py-0.5 rounded">🚚 {p.deliveryTime || "Non précisé"}</span>
@@ -1020,6 +1167,13 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
               );
             })}
           </div>
+          {visibleCount < filtered.length && (
+            <div className="text-center mt-5">
+              <button onClick={() => setVisibleCount((c) => c + 20)} className="f-mono text-xs bg-[#14213D]/5 text-[#14213D] px-5 py-2.5 rounded-full">
+                Voir plus ({filtered.length - visibleCount} restant{filtered.length - visibleCount > 1 ? "s" : ""})
+              </button>
+            </div>
+          )}
         </>
       )}
 
@@ -1049,8 +1203,9 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
               {o.shippingMethod === "livreur" && o.courierName && (
                 <div className="mt-1">
                   <p className="f-mono text-[10px] text-[#14213D]/50">
-                    🏍️ {o.courierName} · Frais de livraison (à régler au livreur) : {(o.deliveryFee || 0).toLocaleString("fr-FR")} F
+                    Frais de livraison (à régler au livreur) : {(o.deliveryFee || 0).toLocaleString("fr-FR")} F
                   </p>
+                  <CourierTrackingCard order={o} />
                   {o.status !== "livree" && !o.buyerConfirmed && (
                     <button onClick={() => confirmDeliveryByBuyer(o.id)} className="w-full f-mono text-xs bg-[#2D6A4F] text-white py-1.5 rounded-full mt-1.5">
                       J'ai reçu ma commande
@@ -1224,6 +1379,11 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                         💵 À la livraison
                       </button>
                     </div>
+                    {paymentMethod === "cinetpay" && (
+                      <div className="mt-2">
+                        <PaymentBadges />
+                      </div>
+                    )}
                   </div>
                   {payError && <p className="f-body text-xs text-[#C1440E]">{payError}</p>}
                   {payNotice && <p className="f-body text-xs text-[#2D6A4F]">{payNotice}</p>}
@@ -1247,7 +1407,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
 
 function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addProduct, updateProduct, deleteProduct, orders, confirmOrder, cancelOrder, shipOrder, updateStatus, setRole, trialDays, accessFee, onPhoneChanged, tip }) {
   const [shipForm, setShipForm] = useState({}); // { [orderId]: { company, tracking } }
-  const [form, setForm] = useState({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrl: "", deliveryTime: "" });
+  const [form, setForm] = useState({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrl: "", deliveryTime: "", description: "", vendorLandmark: vendorInfo.landmark || "" });
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [editingProfile, setEditingProfile] = useState(false);
@@ -1255,8 +1415,22 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
   const [publishing, setPublishing] = useState(false);
   const [uploadingImg, setUploadingImg] = useState(false);
   const [uploadingEditImg, setUploadingEditImg] = useState(false);
+  const [landmarkDraft, setLandmarkDraft] = useState(vendorInfo.landmark || "");
+  const [savingLandmark, setSavingLandmark] = useState(false);
+  const [showStats, setShowStats] = useState(false);
+  const [receiptOrder, setReceiptOrder] = useState(null);
   const myProducts = products.filter((p) => p.vendorPhone === vendorInfo.phone);
   const myOrders = orders.filter((o) => o.items.some((it) => myProducts.some((p) => p.id === it.id)));
+
+  async function saveLandmark() {
+    setSavingLandmark(true);
+    try {
+      await apiSend(`/api/vendors/${encodeURIComponent(vendorInfo.phone)}/landmark`, "PUT", { landmark: landmarkDraft }, getPhoneToken(vendorInfo.phone));
+    } catch {
+      // échec silencieux, le champ reste modifiable pour réessayer
+    }
+    setSavingLandmark(false);
+  }
 
   if (!vendorInfo.registered) {
     return (
@@ -1271,10 +1445,10 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
 
   function startEdit(p) {
     setEditingId(p.id);
-    setEditForm({ price: p.price, stock: p.stock, deliveryTime: p.deliveryTime || "", imageUrl: p.imageUrl || "" });
+    setEditForm({ price: p.price, stock: p.stock, deliveryTime: p.deliveryTime || "", imageUrl: p.imageUrl || "", description: p.description || "", vendorLandmark: p.vendorLandmark || "" });
   }
   function saveEdit(id) {
-    updateProduct(id, { price: Number(editForm.price), stock: Number(editForm.stock), deliveryTime: editForm.deliveryTime || "Non précisé", imageUrl: editForm.imageUrl || "" });
+    updateProduct(id, { price: Number(editForm.price), stock: Number(editForm.stock), deliveryTime: editForm.deliveryTime || "Non précisé", imageUrl: editForm.imageUrl || "", description: editForm.description || "", vendorLandmark: editForm.vendorLandmark || "" });
     setEditingId(null);
   }
   async function handleImageUpload(file, target) {
@@ -1306,6 +1480,30 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
     const sub = o.items.filter((it) => myIds.includes(it.id)).reduce((a, it) => a + it.price * it.qty, 0);
     return s + sub * (1 - (o.feeRate ?? 0));
   }, 0);
+
+  // Statistiques : produits les plus vendus (hors commandes annulées) et stock bas.
+  const salesByProduct = {};
+  myOrders.forEach((o) => {
+    if (o.status === "annulee") return;
+    o.items.forEach((it) => {
+      if (myProducts.some((p) => p.id === it.id)) salesByProduct[it.id] = (salesByProduct[it.id] || 0) + it.qty;
+    });
+  });
+  const bestSellers = [...myProducts].map((p) => ({ ...p, sold: salesByProduct[p.id] || 0 })).sort((a, b) => b.sold - a.sold).slice(0, 5);
+  const lowStock = myProducts.filter((p) => p.stock <= 5).sort((a, b) => a.stock - b.stock);
+
+  function exportOrdersCSV() {
+    const headers = ["ID", "Date", "Zone", "Statut", "Total (F)", "Livreur", "Téléphone acheteur"];
+    const rows = myOrders.map((o) => [o.id, new Date(o.createdAt).toLocaleDateString("fr-FR"), o.zone, o.status, o.total, o.courierName || "", o.buyerPhone]);
+    const csv = [headers, ...rows].map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `commandes-zonako-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 
   if (vendorInfo.suspended) {
     return (
@@ -1350,6 +1548,11 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
         <p className="f-mono text-[11px] text-[#14213D]/40">{vendorInfo.phone}</p>
         <ChangePhoneNumber role="vendor" info={vendorInfo} accentColor="#2D6A4F" onChanged={onPhoneChanged} />
       </div>
+      <div className="mb-6 flex items-center gap-2">
+        <input placeholder="Ton point de repère (quartier, repère connu...)" value={landmarkDraft} onChange={(e) => setLandmarkDraft(e.target.value)} className="f-body flex-1 px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-xs" />
+        <button disabled={savingLandmark} onClick={saveLandmark} className="f-mono text-[11px] bg-[#2D6A4F]/10 text-[#2D6A4F] px-3 py-2 rounded-lg whitespace-nowrap">{savingLandmark ? "…" : "Enregistrer"}</button>
+      </div>
+      <p className="f-body text-[10px] text-[#14213D]/35 -mt-4 mb-6">Utilisé par défaut sur tes nouveaux produits — visible par le livreur pour te retrouver facilement.</p>
       {tip && (
         <div className="mb-6 f-body text-sm bg-[#2D6A4F]/10 text-[#14213D] border-2 border-[#2D6A4F]/20 rounded-xl px-4 py-3">
           💡 {tip}
@@ -1371,6 +1574,50 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
         </div>
       </div>
 
+      <div className="flex gap-2 mb-6">
+        <button onClick={() => setShowStats((s) => !s)} className="flex-1 f-mono text-xs bg-[#14213D]/5 text-[#14213D] py-2 rounded-full">
+          {showStats ? "Masquer les statistiques" : "📊 Voir les statistiques"}
+        </button>
+        <button onClick={exportOrdersCSV} disabled={myOrders.length === 0} className="flex-1 f-mono text-xs bg-[#14213D]/5 disabled:opacity-30 text-[#14213D] py-2 rounded-full">
+          ⬇️ Exporter (Excel)
+        </button>
+      </div>
+
+      {showStats && (
+        <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6 space-y-4">
+          <div>
+            <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-2">Produits les plus vendus</p>
+            {bestSellers.length === 0 || bestSellers.every((p) => p.sold === 0) ? (
+              <p className="f-body text-xs text-[#14213D]/40">Pas encore de vente enregistrée.</p>
+            ) : (
+              <div className="space-y-1.5">
+                {bestSellers.filter((p) => p.sold > 0).map((p, i) => (
+                  <div key={p.id} className="flex items-center justify-between">
+                    <span className="f-body text-xs text-[#14213D]">{i + 1}. {p.name}</span>
+                    <span className="f-mono text-[11px] text-[#2D6A4F] font-semibold">{p.sold} vendu{p.sold > 1 ? "s" : ""}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div>
+            <p className="f-mono text-[11px] uppercase tracking-wide text-[#C1440E] mb-2">Stock bas (≤ 5)</p>
+            {lowStock.length === 0 ? (
+              <p className="f-body text-xs text-[#14213D]/40">Aucun produit en stock bas — tout va bien.</p>
+            ) : (
+              <div className="space-y-1.5">
+                {lowStock.map((p) => (
+                  <div key={p.id} className="flex items-center justify-between">
+                    <span className="f-body text-xs text-[#14213D]">{p.name}</span>
+                    <span className="f-mono text-[11px] text-[#C1440E] font-semibold">{p.stock} restant{p.stock > 1 ? "s" : ""}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="grid lg:grid-cols-[320px_1fr] gap-6">
         <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 h-fit">
           <h3 className="f-display font-semibold text-sm text-[#14213D] mb-3 flex items-center gap-1.5"><Plus size={15} /> Nouveau produit</h3>
@@ -1385,11 +1632,16 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                   {uploadingImg ? "Compression…" : form.imageUrl ? "Changer la photo" : "Choisir une photo"}
                   <input type="file" accept="image/*" className="hidden" onChange={(e) => handleImageUpload(e.target.files[0], "new")} />
                 </label>
+                <label className="flex-1 text-center f-mono text-xs bg-[#14213D]/5 text-[#14213D] py-2 rounded-lg cursor-pointer">
+                  📷 Prendre une photo
+                  <input type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => handleImageUpload(e.target.files[0], "new")} />
+                </label>
                 {form.imageUrl && <button onClick={() => setForm({ ...form, imageUrl: "" })}><X size={16} className="text-[#C1440E]/60" /></button>}
               </div>
-              <p className="f-body text-[10px] text-[#14213D]/35 mt-1">Prise depuis ton téléphone ou ton ordinateur — compressée automatiquement.</p>
+              <p className="f-body text-[10px] text-[#14213D]/35 mt-1">Depuis la galerie ou directement avec l'appareil photo — compressée automatiquement.</p>
             </div>
 
+            <textarea placeholder="Détails sur l'article (matière, taille, état, ce qui le rend spécial...)" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} rows={3} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#2D6A4F]" />
             <input placeholder="Prix (FCFA)" type="number" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#2D6A4F]" />
             <input placeholder="Stock disponible" type="number" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#2D6A4F]" />
             <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm">
@@ -1401,6 +1653,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
               {ZONES.map((z) => <option key={z} value={z}>{z}</option>)}
             </select>
             <p className="f-body text-[10px] text-[#14213D]/35 -mt-1">Choisis une zone précise pour vendre localement, ou « {NATIONAL} » pour être visible partout.</p>
+            <input placeholder="Point de repère pour ce produit (facultatif — sinon celui de ton profil est utilisé)" value={form.vendorLandmark} onChange={(e) => setForm({ ...form, vendorLandmark: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#2D6A4F]" />
             <input placeholder="Délai de préparation (ex: 24h)" value={form.deliveryTime} onChange={(e) => setForm({ ...form, deliveryTime: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#2D6A4F]" />
             <p className="f-body text-[11px] text-[#14213D]/40">Les frais de livraison ne sont plus fixés ici : c'est le livreur qui propose son prix quand il accepte la commande.</p>
             <button
@@ -1408,7 +1661,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
               onClick={async () => {
                 setPublishing(true);
                 await addProduct({ ...form, price: Number(form.price), stock: Number(form.stock) || 0, deliveryTime: form.deliveryTime || "Non précisé", vendorName: vendorInfo.name, vendorPhone: vendorInfo.phone });
-                setForm({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrl: "", deliveryTime: "" });
+                setForm({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrl: "", deliveryTime: "", description: "", vendorLandmark: vendorInfo.landmark || "" });
                 setPublishing(false);
               }}
               className="w-full bg-[#2D6A4F] disabled:opacity-30 text-white f-display font-semibold py-2.5 rounded-full text-sm mt-1"
@@ -1437,7 +1690,9 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                       <input type="number" placeholder="Prix" value={editForm.price} onChange={(e) => setEditForm({ ...editForm, price: e.target.value })} className="f-mono w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
                       <input type="number" placeholder="Stock" value={editForm.stock} onChange={(e) => setEditForm({ ...editForm, stock: e.target.value })} className="f-mono w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
                       <input placeholder="Délai" value={editForm.deliveryTime} onChange={(e) => setEditForm({ ...editForm, deliveryTime: e.target.value })} className="f-mono w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
+                      <input placeholder="Point de repère" value={editForm.vendorLandmark} onChange={(e) => setEditForm({ ...editForm, vendorLandmark: e.target.value })} className="f-mono w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
                     </div>
+                    <textarea placeholder="Détails sur l'article" value={editForm.description} onChange={(e) => setEditForm({ ...editForm, description: e.target.value })} rows={2} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
                     <div className="flex gap-2">
                       <button onClick={() => saveEdit(p.id)} className="flex-1 f-mono text-xs bg-[#2D6A4F] text-white py-1.5 rounded-full">Enregistrer</button>
                       <button onClick={() => setEditingId(null)} className="flex-1 f-mono text-xs bg-[#14213D]/10 text-[#14213D] py-1.5 rounded-full">Annuler</button>
@@ -1504,6 +1759,8 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                     </div>
                     <StatusBadge status={o.status} />
                   </div>
+                  {o.shippingMethod === "livreur" && o.courierName && <CourierTrackingCard order={o} />}
+                  <button onClick={() => setReceiptOrder(o)} className="f-mono text-[10px] text-[#14213D]/40 hover:text-[#14213D] underline mt-1.5">🧾 Voir / imprimer le reçu</button>
                   {o.status === "nouvelle" && (
                     <div className="flex gap-2 mt-3 pt-3 border-t border-dashed border-[#14213D]/10">
                       <button onClick={() => confirmOrder(o.id)} className="flex-1 f-mono text-xs bg-[#2D6A4F] text-white py-1.5 rounded-full">Confirmer la commande</button>
@@ -1547,6 +1804,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
           </div>
         </div>
       </div>
+      {receiptOrder && <ReceiptModal order={receiptOrder} vendorName={vendorInfo.name} vendorPhone={vendorInfo.phone} onClose={() => setReceiptOrder(null)} />}
     </div>
     </SubscriptionGate>
   );
@@ -1555,9 +1813,69 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
 function CourierView({ courierInfo, registerCourier, logoutCourier, orders, submitCourierBid, updateStatus, confirmDeliveryByCourier, trialDays, accessFee, onPhoneChanged, tip }) {
   const [zone, setZone] = useState("");
   const [feeInputs, setFeeInputs] = useState({}); // { [orderId]: proposedFee }
+  const [available_, setAvailable_] = useState(courierInfo.available !== false);
+  const [savingAvailability, setSavingAvailability] = useState(false);
+  const [showEarnings, setShowEarnings] = useState(false);
+  const [vehicleDraft, setVehicleDraft] = useState({ vehicleType: courierInfo.vehicleType || "moto", vehiclePlate: courierInfo.vehiclePlate || "" });
+  const [savingVehicle, setSavingVehicle] = useState(false);
+  const [sharingLocation, setSharingLocation] = useState(false);
+  const [locationError, setLocationError] = useState("");
+  const { daysLeft: accessDaysLeft } = getAccessState(courierInfo, trialDays);
+  const nearExpiry = accessDaysLeft <= 3; // essai ou abonnement expirant dans ≤ 3 jours : plus de nouvelles livraisons
   const available = orders.filter((o) => !o.courierPhone && o.status !== "annulee" && o.status !== "livree" && o.shippingMethod !== "transport" && (!zone || o.zone === zone));
   const mine = orders.filter((o) => o.courierPhone === courierInfo.phone && o.status !== "livree" && o.status !== "annulee");
   const delivered = orders.filter((o) => o.courierPhone === courierInfo.phone && o.status === "livree");
+  const activeTracked = mine.find((o) => o.status === "en_livraison" && o.shippingMethod !== "transport");
+
+  async function saveVehicle() {
+    setSavingVehicle(true);
+    try {
+      await apiSend(`/api/couriers/${encodeURIComponent(courierInfo.phone)}/vehicle`, "PUT", vehicleDraft, getPhoneToken(courierInfo.phone));
+    } catch {
+      // échec silencieux, les champs restent modifiables pour réessayer
+    }
+    setSavingVehicle(false);
+  }
+
+  // Partage de position : uniquement pendant une livraison active, et seulement
+  // si le livreur active lui-même l'option (jamais en arrière-plan sans le vouloir).
+  useEffect(() => {
+    if (!sharingLocation || !activeTracked || !navigator.geolocation) return;
+    const send = (lat, lng) => {
+      apiSend(`/api/orders/${activeTracked.id}/location`, "PUT", { courierPhone: courierInfo.phone, lat, lng }, getPhoneToken(courierInfo.phone)).catch(() => {});
+    };
+    const watchId = navigator.geolocation.watchPosition(
+      (pos) => { setLocationError(""); send(pos.coords.latitude, pos.coords.longitude); },
+      (err) => setLocationError("Impossible d'accéder à ta position — vérifie l'autorisation de localisation."),
+      { enableHighAccuracy: true, maximumAge: 15000, timeout: 20000 }
+    );
+    return () => navigator.geolocation.clearWatch(watchId);
+  }, [sharingLocation, activeTracked?.id]);
+
+  async function toggleAvailability() {
+    const next = !available_;
+    setSavingAvailability(true);
+    setAvailable_(next); // optimiste : on met à jour l'écran tout de suite
+    try {
+      await apiSend(`/api/couriers/${encodeURIComponent(courierInfo.phone)}/availability`, "PUT", { available: next }, getPhoneToken(courierInfo.phone));
+    } catch {
+      setAvailable_(!next); // échec : on annule le changement affiché
+    }
+    setSavingAvailability(false);
+  }
+
+  // Historique des gains : somme des frais de livraison encaissés, par période.
+  const now = Date.now();
+  const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+  const startOfWeek = new Date(startOfToday); startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay());
+  const startOfMonth = new Date(startOfToday.getFullYear(), startOfToday.getMonth(), 1);
+  const sumSince = (ts) => delivered.filter((o) => o.createdAt >= ts).reduce((s, o) => s + (o.deliveryFee || 0), 0);
+  const earnings = {
+    today: sumSince(startOfToday.getTime()),
+    week: sumSince(startOfWeek.getTime()),
+    month: sumSince(startOfMonth.getTime()),
+    total: delivered.reduce((s, o) => s + (o.deliveryFee || 0), 0),
+  };
 
   if (!courierInfo.registered) {
     return (
@@ -1581,6 +1899,54 @@ function CourierView({ courierInfo, registerCourier, logoutCourier, orders, subm
         <p className="f-mono text-[11px] text-[#14213D]/40">{courierInfo.phone}</p>
         <ChangePhoneNumber role="courier" info={courierInfo} accentColor="#C1440E" onChanged={onPhoneChanged} />
       </div>
+
+      <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-5">
+        <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-2">Ton engin (vu par l'acheteur et le vendeur)</p>
+        <div className="grid grid-cols-2 gap-2">
+          <select value={vehicleDraft.vehicleType} onChange={(e) => setVehicleDraft({ ...vehicleDraft, vehicleType: e.target.value })} className="f-body px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm">
+            <option value="moto">🏍️ Moto</option>
+            <option value="velo">🚲 Vélo</option>
+            <option value="voiture">🚗 Voiture</option>
+            <option value="tricycle">🛺 Tricycle</option>
+            <option value="pied">🚶 À pied</option>
+          </select>
+          <input placeholder="Plaque / repère (ex: AB 1234)" value={vehicleDraft.vehiclePlate} onChange={(e) => setVehicleDraft({ ...vehicleDraft, vehiclePlate: e.target.value })} className="f-body px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm" />
+        </div>
+        <button disabled={savingVehicle} onClick={saveVehicle} className="f-mono text-[11px] bg-[#C1440E]/10 text-[#C1440E] px-3 py-2 rounded-lg mt-2">{savingVehicle ? "…" : "Enregistrer"}</button>
+        <p className="f-body text-[10px] text-[#14213D]/35 mt-1.5">Aide le vendeur et l'acheteur à te reconnaître à l'enlèvement et à la livraison.</p>
+      </div>
+
+      <div className="flex gap-2 mb-5">
+        <button disabled={savingAvailability} onClick={toggleAvailability} className={`flex-1 f-mono text-xs py-2 rounded-full ${available_ ? "bg-[#2D6A4F] text-white" : "bg-[#14213D]/10 text-[#14213D]/60"}`}>
+          {available_ ? "🟢 Disponible" : "⚪ Indisponible"}
+        </button>
+        <button onClick={() => setShowEarnings((s) => !s)} className="flex-1 f-mono text-xs bg-[#14213D]/5 text-[#14213D] py-2 rounded-full">
+          {showEarnings ? "Masquer mes gains" : "💰 Mes gains"}
+        </button>
+      </div>
+      {!available_ && <p className="f-body text-[11px] text-[#C1440E]/80 -mt-3 mb-5">Tu es marqué indisponible — tu ne peux pas proposer de prix sur de nouvelles commandes. Réactive-toi quand tu es prêt à reprendre.</p>}
+
+      {showEarnings && (
+        <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-5 grid grid-cols-2 gap-3">
+          <div className="text-center">
+            <p className="f-display font-semibold text-lg text-[#14213D]">{earnings.today.toLocaleString("fr-FR")} F</p>
+            <p className="f-mono text-[10px] uppercase text-[#14213D]/40">Aujourd'hui</p>
+          </div>
+          <div className="text-center">
+            <p className="f-display font-semibold text-lg text-[#14213D]">{earnings.week.toLocaleString("fr-FR")} F</p>
+            <p className="f-mono text-[10px] uppercase text-[#14213D]/40">Cette semaine</p>
+          </div>
+          <div className="text-center">
+            <p className="f-display font-semibold text-lg text-[#14213D]">{earnings.month.toLocaleString("fr-FR")} F</p>
+            <p className="f-mono text-[10px] uppercase text-[#14213D]/40">Ce mois</p>
+          </div>
+          <div className="text-center">
+            <p className="f-display font-semibold text-lg text-[#2D6A4F]">{earnings.total.toLocaleString("fr-FR")} F</p>
+            <p className="f-mono text-[10px] uppercase text-[#14213D]/40">Total</p>
+          </div>
+        </div>
+      )}
+
       {tip && (
         <div className="mb-5 f-body text-sm bg-[#C1440E]/10 text-[#14213D] border-2 border-[#C1440E]/20 rounded-xl px-4 py-3">
           💡 {tip}
@@ -1590,6 +1956,18 @@ function CourierView({ courierInfo, registerCourier, logoutCourier, orders, subm
       {mine.length > 0 && (
         <>
           <h3 className="f-display font-semibold text-sm text-[#14213D] mb-3">Mes livraisons en cours</h3>
+          {activeTracked && (
+            <div className="ticket bg-white border-2 border-[#14213D]/10 p-3 mb-3 flex items-center justify-between gap-2">
+              <div>
+                <p className="f-body text-xs text-[#14213D]">📍 Partager ma position en direct</p>
+                <p className="f-body text-[10px] text-[#14213D]/40">L'acheteur et le vendeur verront où se trouve le colis, en temps réel.</p>
+                {locationError && <p className="f-body text-[10px] text-[#C1440E]">{locationError}</p>}
+              </div>
+              <button onClick={() => setSharingLocation((s) => !s)} className={`f-mono text-[11px] px-3 py-1.5 rounded-full whitespace-nowrap ${sharingLocation ? "bg-[#2D6A4F] text-white" : "bg-[#14213D]/10 text-[#14213D]/60"}`}>
+                {sharingLocation ? "🟢 Actif" : "Activer"}
+              </button>
+            </div>
+          )}
           <div className="space-y-2 mb-6">
             {mine.map((o) => (
               <div key={o.id} className="ticket bg-white border-2 border-[#14213D]/10 p-3">
@@ -1621,6 +1999,15 @@ function CourierView({ courierInfo, registerCourier, logoutCourier, orders, subm
           {ZONES.map((z) => <option key={z} value={z}>{z}</option>)}
         </select>
       </div>
+      {nearExpiry ? (
+        <div className="ticket bg-[#C1440E]/5 p-4 mb-6 text-center">
+          <p className="f-body text-sm text-[#C1440E]/80">Ton accès expire dans {accessDaysLeft} jour{accessDaysLeft > 1 ? "s" : ""} — renouvelle ton abonnement (bandeau ci-dessus) pour proposer un prix sur de nouvelles livraisons.</p>
+        </div>
+      ) : !available_ ? (
+        <div className="ticket bg-[#14213D]/5 p-4 mb-6 text-center">
+          <p className="f-body text-sm text-[#14213D]/50">Tu es marqué indisponible — passe en "🟢 Disponible" en haut pour voir et proposer des prix sur les livraisons.</p>
+        </div>
+      ) : (
       <div className="space-y-2 mb-6">
         {available.map((o) => {
           const myBid = (o.courierBids || []).find((b) => b.courierPhone === courierInfo.phone);
@@ -1635,6 +2022,9 @@ function CourierView({ courierInfo, registerCourier, logoutCourier, orders, subm
                     {isNew && <span className="f-mono text-[9px] bg-[#C1440E] text-white px-1.5 py-0.5 rounded-full">NOUVEAU</span>}
                   </p>
                   <p className="f-mono text-xs text-[#14213D]/40">#{o.id.slice(-6)} · {o.items.length} article(s)</p>
+                  {[...new Set(o.items.map((it) => it.vendorLandmark).filter(Boolean))].map((lm, i) => (
+                    <p key={i} className="f-body text-[11px] text-[#2D6A4F]/80">📍 {lm}</p>
+                  ))}
                   {otherBidsCount > 0 && <p className="f-mono text-[10px] text-[#14213D]/40">{otherBidsCount} autre{otherBidsCount > 1 ? "s" : ""} livreur{otherBidsCount > 1 ? "s ont" : " a"} déjà proposé un prix</p>}
                 </div>
               </div>
@@ -1660,6 +2050,7 @@ function CourierView({ courierInfo, registerCourier, logoutCourier, orders, subm
         })}
         {available.length === 0 && <p className="f-body text-sm text-[#14213D]/40">Aucune livraison disponible pour l'instant.</p>}
       </div>
+      )}
 
       {delivered.length > 0 && (
         <>
@@ -1784,6 +2175,8 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
 
   const [couriers, setCouriers] = useState([]);
   const [refunds, setRefunds] = useState([]);
+  const [adminActions, setAdminActions] = useState([]);
+  const [showAdminLog, setShowAdminLog] = useState(false);
 
   async function loadCouriersAndRefunds() {
     try {
@@ -1798,6 +2191,14 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
     }
   }
   useEffect(() => { if (ownerToken) loadCouriersAndRefunds(); }, [ownerToken]);
+
+  async function loadAdminActions() {
+    try {
+      setAdminActions(await apiSend("/api/admin-actions", "GET", undefined, ownerToken));
+    } catch (e) {
+      console.error("Erreur de chargement du journal:", e);
+    }
+  }
 
   async function toggleCourierVerified(phone, verified) {
     await apiSend(`/api/couriers/${encodeURIComponent(phone)}/${verified ? "unverify" : "verify"}`, "POST", undefined, ownerToken);
@@ -1819,11 +2220,6 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
     }
     setLoggingIn(false);
   }
-
-  // Ce useEffect doit rester avant tout "return" conditionnel : les Hooks React
-  // doivent toujours être appelés dans le même ordre à chaque rendu, sinon on
-  // obtient l'erreur #310 (c'était le bug qui rendait cet écran blanc).
-  useEffect(() => { if (ownerToken) loadRisk(); }, [ownerToken]);
 
   // Le code d'accès vit uniquement dans la variable d'environnement OWNER_PASSCODE
   // du serveur — jamais dans ce fichier ni dans le navigateur. C'est le serveur qui
@@ -1858,6 +2254,8 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
       </div>
     );
   }
+
+  useEffect(() => { if (ownerToken) loadRisk(); }, [ownerToken]);
 
   const activeOrders = orders.filter((o) => o.status !== "annulee");
   const gmv = activeOrders.reduce((s, o) => s + o.total, 0);
@@ -1953,6 +2351,30 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
         <p className="f-body text-xs text-[#14213D]/40 mt-2">
           Le code d'accès propriétaire se change côté serveur (variable d'environnement <code>OWNER_PASSCODE</code> chez ton hébergeur), pas depuis cette page — voir le README.
         </p>
+      </div>
+
+      <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
+        <div className="flex items-center justify-between">
+          <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60">Journal des actions</p>
+          <button onClick={() => { setShowAdminLog((s) => !s); if (!showAdminLog) loadAdminActions(); }} className="f-mono text-[10px] text-[#14213D]/40 hover:text-[#14213D] underline">
+            {showAdminLog ? "Masquer" : "Afficher"}
+          </button>
+        </div>
+        {showAdminLog && (
+          <div className="mt-3 space-y-1.5 max-h-64 overflow-y-auto">
+            {adminActions.length === 0 && <p className="f-body text-xs text-[#14213D]/40">Aucune action enregistrée pour l'instant.</p>}
+            {adminActions.map((a) => (
+              <div key={a.id} className="flex items-center justify-between border-b border-dashed border-[#14213D]/10 pb-1.5">
+                <div>
+                  <span className="f-body text-xs text-[#14213D]">{a.action}</span>
+                  {a.target && <span className="f-mono text-[10px] text-[#14213D]/40"> · {a.target}</span>}
+                  {a.details && <p className="f-body text-[11px] text-[#14213D]/50">{a.details}</p>}
+                </div>
+                <span className="f-mono text-[10px] text-[#14213D]/30 whitespace-nowrap ml-2">{new Date(a.createdAt).toLocaleString("fr-FR")}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
@@ -2119,6 +2541,7 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
 
 function App() {
   const [role, setRole] = useState("home");
+  const checkoutKeyRef = useRef(uid()); // anti-doublon : même clé tant qu'on n'a pas commandé avec succès
   const [showLegal, setShowLegal] = useState(false);
   const [products, setProducts] = useState([]);
   const [orders, setOrders] = useState([]);
@@ -2300,7 +2723,9 @@ function App() {
       paymentMethod: payInfo.paymentMethod || "cod",
       cinetpayTransactionId: payInfo.transactionId || null,
       shippingMethod,
+      clientKey: checkoutKeyRef.current,
     }, getPhoneToken(buyerInfo.phone));
+    checkoutKeyRef.current = uid(); // commande réussie : nouvelle clé pour la prochaine
     setOrders((prev) => [created, ...prev]);
     setCart([]);
     setShowCart(false);
