@@ -782,8 +782,8 @@ function RegisterWithPhoneVerification({ title, subtitle, accentColor, onSubmit 
       const r = await apiSend("/api/auth/send-code", "POST", { phone: form.phone });
       setTestMode(!!r.testMode);
       setStep("code");
-    } catch {
-      setError(mode === "email" ? "Impossible d'envoyer le code. Vérifie l'adresse email." : "Impossible d'envoyer le code. Vérifie le numéro.");
+    } catch (e) {
+      setError(e.message || (mode === "email" ? "Impossible d'envoyer le code. Vérifie l'adresse email." : "Impossible d'envoyer le code. Vérifie le numéro."));
     }
     setBusy(false);
   }
@@ -866,8 +866,8 @@ function ChangePhoneNumber({ role, info, accentColor, onChanged }) {
       const r = await apiSend("/api/auth/send-code", "POST", { phone: newPhone });
       setTestMode(!!r.testMode);
       setStep("code");
-    } catch {
-      setError("Impossible d'envoyer le code. Vérifie le numéro.");
+    } catch (e) {
+      setError(e.message || "Impossible d'envoyer le code. Vérifie le numéro.");
     }
     setBusy(false);
   }
@@ -2196,6 +2196,7 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
     }
   }
   useEffect(() => { if (ownerToken) loadCouriersAndRefunds(); }, [ownerToken]);
+  useEffect(() => { if (ownerToken) loadRisk(); }, [ownerToken]);
 
   async function loadAdminActions() {
     try {
@@ -2259,8 +2260,6 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
       </div>
     );
   }
-
-  useEffect(() => { if (ownerToken) loadRisk(); }, [ownerToken]);
 
   const activeOrders = orders.filter((o) => o.status !== "annulee");
   const gmv = activeOrders.reduce((s, o) => s + o.total, 0);
