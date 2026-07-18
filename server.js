@@ -38,38 +38,28 @@ if (!TWILIO_CONFIGURED) {
 }
 
 // Connexion par email (en plus du téléphone) — envoie un code par email via
-// l'API HTTP de Brevo (https://api.brevo.com), PAS via SMTP. Le plan gratuit
-// de Render bloque les connexions SMTP sortantes (ports 25/465/587), ce qui
-// provoquait une erreur "ETIMEDOUT" à chaque tentative d'envoi. L'API HTTP de
-// Brevo passe par le port 443 (HTTPS), qui lui n'est jamais bloqué.
-// Nécessite BREVO_API_KEY (Brevo > SMTP & API > API Keys > Generate a new API key)
-// et EMAIL_FROM (l'adresse expéditrice, doit être vérifiée dans Brevo si besoin).
-// Facultatif : sans réglage, les codes email s'affichent dans les logs du serveur.
-const BREVO_API_KEY = process.env.BREVO_API_KEY || "";
-const EMAIL_FROM = process.env.EMAIL_FROM || process.env.SMTP_FROM || "";
-const EMAIL_CONFIGURED = BREVO_API_KEY && EMAIL_FROM;
-if (!EMAIL_CONFIGURED) {
-  console.warn("⚠️  Brevo (API) non configuré — les codes envoyés par email s'afficheront dans les logs du serveur (mode test).");
+// SMTP. Fonctionne avec Gmail (mot de passe d'application), ou n'importe quel
+// fournisseur SMTP classique. Facultatif : sans réglage, les codes email
+// s'affichent dans les logs du serveur, comme pour les SMS.
+const SMTP_HOST = process.env.SMTP_HOST || "";
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_USER = process.env.SMTP_USER || "";
+const SMTP_PASS = process.env.SMTP_PASS || "";
+const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER;
+const SMTP_CONFIGURED = SMTP_HOST && SMTP_USER && SMTP_PASS;
+if (!SMTP_CONFIGURED) {
+  console.warn("⚠️  SMTP non configuré — les codes envoyés par email s'afficheront dans les logs du serveur (mode test).");
 }
+const mailTransporter = SMTP_CONFIGURED
+  ? nodemailer.createTransport({ host: SMTP_HOST, port: SMTP_PORT, secure: SMTP_PORT === 465, auth: { user: SMTP_USER, pass: SMTP_PASS } })
+  : null;
 async function sendEmailCode(email, code) {
-  const r = await fetch("https://api.brevo.com/v3/smtp/email", {
-    method: "POST",
-    headers: {
-      "api-key": BREVO_API_KEY,
-      "Content-Type": "application/json",
-      "Accept": "application/json",
-    },
-    body: JSON.stringify({
-      sender: { email: EMAIL_FROM, name: "Zonako" },
-      to: [{ email }],
-      subject: "Ton code de vérification Zonako",
-      textContent: `Ton code de vérification Zonako est : ${code}\n\nIl est valable 10 minutes.`,
-    }),
+  await mailTransporter.sendMail({
+    from: SMTP_FROM,
+    to: email,
+    subject: "Ton code de vérification Zonako",
+    text: `Ton code de vérification Zonako est : ${code}\n\nIl est valable 10 minutes.`,
   });
-  if (!r.ok) {
-    const msg = await r.text().catch(() => "Erreur serveur");
-    throw new Error(`Brevo (envoi email) a répondu ${r.status} : ${msg}`);
-  }
 }
 
 const pool = new Pool({
@@ -94,21 +84,38 @@ function uid() {
   return Date.now().toString(36) + crypto.randomBytes(4).toString("hex");
 }
 
-// --- Auth propriétaire (token en mémoire, simple et suffisant pour un seul admin) ---
-const ownerTokens = new Map(); // token -> expiresAt
-function issueOwnerToken() {
+// --- Auth propriétaire (jeton stocké en base — survit aux redémarrages du serveur) ---
+async function issueOwnerToken() {
   const token = crypto.randomBytes(24).toString("hex");
-  ownerTokens.set(token, Date.now() + 12 * 3600 * 1000); // 12h
+  await pool.query("INSERT INTO owner_tokens (token, expires_at) VALUES ($1,$2)", [token, Date.now() + 12 * 3600 * 1000]); // 12h
   return token;
 }
-function requireOwner(req, res, next) {
+async function requireOwner(req, res, next) {
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
-  const expiresAt = token && ownerTokens.get(token);
-  if (!expiresAt || expiresAt < Date.now()) {
-    return res.status(401).json({ error: "Non autorisé. Reconnecte-toi à l'espace propriétaire." });
+  if (!token) return res.status(401).json({ error: "Non autorisé. Reconnecte-toi à l'espace propriétaire." });
+  try {
+    const { rows } = await pool.query("SELECT expires_at FROM owner_tokens WHERE token = $1", [token]);
+    if (!rows[0] || Number(rows[0].expires_at) < Date.now()) {
+      return res.status(401).json({ error: "Non autorisé. Reconnecte-toi à l'espace propriétaire." });
+    }
+    next();
+  } catch (e) {
+    console.error("Erreur de vérification du jeton propriétaire:", e);
+    res.status(500).json({ error: "Erreur serveur." });
   }
-  next();
+}
+// Journal des actions du propriétaire — jamais bloquant : une erreur ici n'empêche
+// pas l'action elle-même de réussir.
+async function logAdminAction(action, target, details) {
+  try {
+    await pool.query(
+      "INSERT INTO admin_actions (id, action, target, details, created_at) VALUES ($1,$2,$3,$4,$5)",
+      [uid(), action, target || null, details || null, Date.now()]
+    );
+  } catch (e) {
+    console.error("Erreur d'écriture du journal admin (non bloquant):", e.message);
+  }
 }
 
 // --- Auth par téléphone (OTP SMS) : un jeton prouve "j'ai reçu le code envoyé à ce numéro" ---
@@ -147,6 +154,7 @@ function mapProduct(r) {
     id: r.id, name: r.name, price: Number(r.price), category: r.category, zone: r.zone,
     stock: r.stock, imageUrl: r.image_url, deliveryTime: r.delivery_time,
     vendorName: r.vendor_name, vendorPhone: r.vendor_phone, createdAt: Number(r.created_at),
+    description: r.description || "", vendorLandmark: r.vendor_landmark || "",
   };
 }
 function mapOrder(r) {
@@ -160,6 +168,11 @@ function mapOrder(r) {
     courierBids: r.courier_bids || [], courierConfirmed: r.courier_confirmed, courierConfirmedAt: r.courier_confirmed_at ? Number(r.courier_confirmed_at) : null,
     buyerConfirmed: r.buyer_confirmed, buyerConfirmedAt: r.buyer_confirmed_at ? Number(r.buyer_confirmed_at) : null,
     refundStatus: r.refund_status || "none",
+    courierLat: r.courier_lat !== null && r.courier_lat !== undefined ? Number(r.courier_lat) : null,
+    courierLng: r.courier_lng !== null && r.courier_lng !== undefined ? Number(r.courier_lng) : null,
+    locationUpdatedAt: r.location_updated_at ? Number(r.location_updated_at) : null,
+    courierVehicleType: r.courier_vehicle_type || "",
+    courierVehiclePlate: r.courier_vehicle_plate || "",
   };
 }
 function mapProfile(r) {
@@ -172,6 +185,10 @@ function mapProfile(r) {
     suspendedReason: r.suspended_reason || null,
     suspendedAt: r.suspended_at ? Number(r.suspended_at) : null,
     verified: r.verified || false,
+    landmark: r.landmark || "",
+    available: r.available !== false,
+    vehicleType: r.vehicle_type || "",
+    vehiclePlate: r.vehicle_plate || "",
   };
 }
 function mapReport(r) {
@@ -257,13 +274,13 @@ app.post("/api/auth/send-code", async (req, res) => {
          ON CONFLICT (phone) DO UPDATE SET code = $2, expires_at = $3, attempts = 0`,
         [phone, code, Date.now() + 10 * 60 * 1000]
       );
-      if (EMAIL_CONFIGURED) {
+      if (SMTP_CONFIGURED) {
         await sendEmailCode(phone, code);
       } else {
-        console.log(`[MODE TEST — Brevo (API) non configuré] Code de vérification pour ${phone} : ${code}`);
+        console.log(`[MODE TEST — pas de SMTP configuré] Code de vérification pour ${phone} : ${code}`);
       }
       recordOtpAttempt(phone);
-      return res.json({ ok: true, testMode: !EMAIL_CONFIGURED });
+      return res.json({ ok: true, testMode: !SMTP_CONFIGURED });
     }
     if (TWILIO_CONFIGURED) {
       await twilioSendCode(phone);
@@ -329,14 +346,16 @@ app.get("/api/products", async (req, res) => {
 
 app.post("/api/products", requirePhone((req) => req.body.vendorPhone), async (req, res) => {
   const p = req.body;
-  const { rows: prof } = await pool.query("SELECT suspended FROM profiles WHERE role = 'vendor' AND phone = $1", [p.vendorPhone]);
+  const { rows: prof } = await pool.query("SELECT suspended, landmark FROM profiles WHERE role = 'vendor' AND phone = $1", [p.vendorPhone]);
   if (prof[0]?.suspended) return res.status(403).json({ error: "Ton compte vendeur est suspendu. Contacte le propriétaire de la plateforme." });
   const id = uid();
   const createdAt = Date.now();
+  // Le point de repère : celui donné pour ce produit, sinon celui par défaut du profil vendeur.
+  const landmark = p.vendorLandmark || prof[0]?.landmark || "";
   await pool.query(
-    `INSERT INTO products (id, name, price, category, zone, stock, image_url, delivery_time, vendor_name, vendor_phone, created_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-    [id, p.name, p.price, p.category, p.zone, p.stock || 0, p.imageUrl || "", p.deliveryTime || "Non précisé", p.vendorName, p.vendorPhone, createdAt]
+    `INSERT INTO products (id, name, price, category, zone, stock, image_url, delivery_time, vendor_name, vendor_phone, created_at, description, vendor_landmark)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+    [id, p.name, p.price, p.category, p.zone, p.stock || 0, p.imageUrl || "", p.deliveryTime || "Non précisé", p.vendorName, p.vendorPhone, createdAt, p.description || "", landmark]
   );
   const { rows } = await pool.query("SELECT * FROM products WHERE id = $1", [id]);
   res.json(mapProduct(rows[0]));
@@ -355,6 +374,8 @@ app.patch("/api/products/:id", async (req, res) => {
   if (patch.stock !== undefined) { sets.push(`stock = $${i++}`); vals.push(patch.stock); }
   if (patch.deliveryTime !== undefined) { sets.push(`delivery_time = $${i++}`); vals.push(patch.deliveryTime); }
   if (patch.imageUrl !== undefined) { sets.push(`image_url = $${i++}`); vals.push(patch.imageUrl); }
+  if (patch.description !== undefined) { sets.push(`description = $${i++}`); vals.push(patch.description); }
+  if (patch.vendorLandmark !== undefined) { sets.push(`vendor_landmark = $${i++}`); vals.push(patch.vendorLandmark); }
   if (sets.length === 0) return res.status(400).json({ error: "Rien à mettre à jour." });
   vals.push(req.params.id);
   await pool.query(`UPDATE products SET ${sets.join(", ")} WHERE id = $${i}`, vals);
@@ -378,7 +399,17 @@ app.get("/api/orders", async (req, res) => {
 });
 
 app.post("/api/orders", requirePhone((req) => req.body.buyerPhone), async (req, res) => {
-  const o = req.body; // { buyerName, buyerPhone, zone, items, total, deliveryFee, paymentMethod, cinetpayTransactionId, shippingMethod }
+  const o = req.body; // { buyerName, buyerPhone, zone, items, total, deliveryFee, paymentMethod, cinetpayTransactionId, shippingMethod, clientKey }
+  // Anti-doublon : si ce même clientKey a déjà créé une commande il y a moins de
+  // 30 secondes (double-clic, mauvaise connexion qui fait réessayer...), on renvoie
+  // la commande déjà créée au lieu d'en recréer une deuxième.
+  if (o.clientKey) {
+    const { rows: existing } = await pool.query("SELECT order_id, created_at FROM order_idempotency WHERE client_key = $1", [o.clientKey]);
+    if (existing[0] && Date.now() - Number(existing[0].created_at) < 30000) {
+      const { rows } = await pool.query("SELECT * FROM orders WHERE id = $1", [existing[0].order_id]);
+      if (rows[0]) return res.json(mapOrder(rows[0]));
+    }
+  }
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -399,6 +430,12 @@ app.post("/api/orders", requirePhone((req) => req.body.buyerPhone), async (req, 
       [id, o.buyerName, o.buyerPhone, o.zone, JSON.stringify(o.items || []), o.total, o.deliveryFee || 0, feeRate, commission,
         createdAt, o.paymentMethod || "cod", o.cinetpayTransactionId || null, o.shippingMethod || "livreur"]
     );
+    if (o.clientKey) {
+      await client.query(
+        "INSERT INTO order_idempotency (client_key, order_id, created_at) VALUES ($1,$2,$3) ON CONFLICT (client_key) DO NOTHING",
+        [o.clientKey, id, createdAt]
+      );
+    }
     // Déduction du stock vendu, dans la même transaction
     for (const item of (o.items || [])) {
       await client.query("UPDATE products SET stock = GREATEST(0, stock - $1) WHERE id = $2", [item.qty, item.id]);
@@ -455,8 +492,26 @@ app.patch("/api/orders/:id", async (req, res) => {
 });
 
 // Un livreur propose (ou met à jour) son prix — seulement en son propre nom.
+// Même logique que côté client (getAccessState) : jours restants sur l'essai
+// gratuit, ou sur l'abonnement payant s'il est actif.
+function computeDaysLeft(profile, trialDays) {
+  const trialStartedAt = profile.trial_started_at ? Number(profile.trial_started_at) : Date.now();
+  const daysUsed = Math.floor((Date.now() - trialStartedAt) / 86400000);
+  const trialDaysLeft = Math.max(0, trialDays - daysUsed);
+  const subscriptionActive = profile.subscription_status === "active" && profile.subscription_expires_at && Number(profile.subscription_expires_at) > Date.now();
+  if (subscriptionActive) return Math.ceil((Number(profile.subscription_expires_at) - Date.now()) / 86400000);
+  return trialDaysLeft;
+}
+
 app.post("/api/orders/:id/bids", requirePhone((req) => req.body.courierPhone), async (req, res) => {
   const { courierName, courierPhone, fee } = req.body;
+  const { rows: prof } = await pool.query("SELECT * FROM profiles WHERE role = 'courier' AND phone = $1", [courierPhone]);
+  if (prof[0] && prof[0].available === false) return res.status(403).json({ error: "Tu es marqué indisponible — réactive-toi depuis ton espace pour proposer un prix." });
+  if (prof[0]) {
+    const { rows: settingsRows } = await pool.query("SELECT trial_days FROM settings WHERE id = 1");
+    const daysLeft = computeDaysLeft(prof[0], settingsRows[0].trial_days);
+    if (daysLeft <= 3) return res.status(403).json({ error: "Ton accès Zonako expire bientôt — renouvelle ton abonnement avant de proposer un prix sur une nouvelle livraison." });
+  }
   const { rows } = await pool.query("SELECT courier_bids FROM orders WHERE id = $1", [req.params.id]);
   if (!rows[0]) return res.status(404).json({ error: "Commande introuvable." });
   const bids = (rows[0].courier_bids || []).filter((b) => b.courierPhone !== courierPhone);
@@ -473,9 +528,10 @@ app.post("/api/orders/:id/choose-courier", async (req, res) => {
   if (!existing[0]) return res.status(404).json({ error: "Commande introuvable." });
   if (!tokenPhone || tokenPhone !== existing[0].buyer_phone) return res.status(403).json({ error: "Ce n'est pas ta commande." });
   const { courierName, courierPhone, fee } = req.body;
+  const { rows: courierProf } = await pool.query("SELECT vehicle_type, vehicle_plate FROM profiles WHERE role = 'courier' AND phone = $1", [courierPhone]);
   await pool.query(
-    "UPDATE orders SET status = 'en_livraison', courier_name = $1, courier_phone = $2, delivery_fee = $3 WHERE id = $4",
-    [courierName, courierPhone, Number(fee) || 0, req.params.id]
+    "UPDATE orders SET status = 'en_livraison', courier_name = $1, courier_phone = $2, delivery_fee = $3, courier_vehicle_type = $4, courier_vehicle_plate = $5 WHERE id = $6",
+    [courierName, courierPhone, Number(fee) || 0, courierProf[0]?.vehicle_type || "", courierProf[0]?.vehicle_plate || "", req.params.id]
   );
   const { rows } = await pool.query("SELECT * FROM orders WHERE id = $1", [req.params.id]);
   const updated = mapOrder(rows[0]);
@@ -534,6 +590,45 @@ app.put("/api/profiles/:role/:phone", requirePhone((req) => req.params.phone), a
   }
   const { rows: r2 } = await pool.query("SELECT * FROM profiles WHERE role = $1 AND phone = $2", [role, phone]);
   res.json(mapProfile(r2[0]));
+});
+
+// Point de repère par défaut du vendeur (quartier, repère) — réutilisé pour
+// chaque nouveau produit publié, visible par les livreurs.
+app.put("/api/vendors/:phone/landmark", requirePhone((req) => req.params.phone), async (req, res) => {
+  await pool.query("UPDATE profiles SET landmark = $1 WHERE role = 'vendor' AND phone = $2", [req.body.landmark || "", req.params.phone]);
+  res.json({ ok: true });
+});
+
+// Disponibilité du livreur : quand désactivée, il ne peut plus proposer de prix
+// sur de nouvelles commandes (vérifié aussi côté serveur, pas juste à l'écran).
+app.put("/api/couriers/:phone/availability", requirePhone((req) => req.params.phone), async (req, res) => {
+  await pool.query("UPDATE profiles SET available = $1 WHERE role = 'courier' AND phone = $2", [!!req.body.available, req.params.phone]);
+  res.json({ ok: true });
+});
+
+// Informations sur l'engin du livreur — vues par l'acheteur et le vendeur pour
+// reconnaître qui vient enlever/livrer le colis.
+app.put("/api/couriers/:phone/vehicle", requirePhone((req) => req.params.phone), async (req, res) => {
+  await pool.query(
+    "UPDATE profiles SET vehicle_type = $1, vehicle_plate = $2 WHERE role = 'courier' AND phone = $3",
+    [req.body.vehicleType || "", req.body.vehiclePlate || "", req.params.phone]
+  );
+  res.json({ ok: true });
+});
+
+// Position en direct du livreur pendant une livraison en cours — partagée
+// volontairement depuis son téléphone, uniquement sur SA propre commande active.
+app.put("/api/orders/:id/location", requirePhone((req) => req.body.courierPhone), async (req, res) => {
+  const { courierPhone, lat, lng } = req.body;
+  const { rows } = await pool.query("SELECT courier_phone, status FROM orders WHERE id = $1", [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: "Commande introuvable." });
+  if (rows[0].courier_phone !== courierPhone) return res.status(403).json({ error: "Ce n'est pas ta livraison." });
+  if (rows[0].status !== "en_livraison") return res.status(400).json({ error: "Cette livraison n'est plus active." });
+  await pool.query(
+    "UPDATE orders SET courier_lat = $1, courier_lng = $2, location_updated_at = $3 WHERE id = $4",
+    [lat, lng, Date.now(), req.params.id]
+  );
+  res.json({ ok: true });
 });
 
 // Changement de numéro : il faut prouver qu'on possède ET l'ancien numéro (jeton
@@ -642,6 +737,7 @@ app.get("/api/reports", requireOwner, async (req, res) => {
 
 app.post("/api/reports/:id/review", requireOwner, async (req, res) => {
   await pool.query("UPDATE vendor_reports SET status = 'reviewed' WHERE id = $1", [req.params.id]);
+  logAdminAction("Signalement traité", req.params.id);
   res.json({ ok: true });
 });
 
@@ -692,6 +788,7 @@ app.post("/api/vendors/:phone/suspend", requireOwner, async (req, res) => {
     "UPDATE profiles SET suspended = true, suspended_reason = $1, suspended_at = $2 WHERE role = 'vendor' AND phone = $3",
     [reason || "", Date.now(), req.params.phone]
   );
+  logAdminAction("Vendeur suspendu", req.params.phone, reason || "");
   res.json({ ok: true });
 });
 
@@ -700,6 +797,7 @@ app.post("/api/vendors/:phone/unsuspend", requireOwner, async (req, res) => {
     "UPDATE profiles SET suspended = false, suspended_reason = NULL, suspended_at = NULL WHERE role = 'vendor' AND phone = $1",
     [req.params.phone]
   );
+  logAdminAction("Suspension levée", req.params.phone);
   res.json({ ok: true });
 });
 
@@ -742,10 +840,12 @@ app.get("/api/ratings/:phone", async (req, res) => {
 // aux acheteurs quand ils comparent les propositions de prix.
 app.post("/api/couriers/:phone/verify", requireOwner, async (req, res) => {
   await pool.query("UPDATE profiles SET verified = true WHERE role = 'courier' AND phone = $1", [req.params.phone]);
+  logAdminAction("Livreur vérifié", req.params.phone);
   res.json({ ok: true });
 });
 app.post("/api/couriers/:phone/unverify", requireOwner, async (req, res) => {
   await pool.query("UPDATE profiles SET verified = false WHERE role = 'courier' AND phone = $1", [req.params.phone]);
+  logAdminAction("Vérification retirée", req.params.phone);
   res.json({ ok: true });
 });
 app.get("/api/couriers", requireOwner, async (req, res) => {
@@ -757,12 +857,19 @@ app.get("/api/couriers", requireOwner, async (req, res) => {
 // CinetPay n'offre pas d'API de remboursement automatique : cette liste
 // recense les commandes payées puis annulées, à rembourser manuellement
 // depuis le back-office CinetPay. Une fois fait, le propriétaire la marque "traité".
+// Journal des actions du propriétaire — les 100 plus récentes.
+app.get("/api/admin-actions", requireOwner, async (req, res) => {
+  const { rows } = await pool.query("SELECT * FROM admin_actions ORDER BY created_at DESC LIMIT 100");
+  res.json(rows.map((r) => ({ id: r.id, action: r.action, target: r.target, details: r.details, createdAt: Number(r.created_at) })));
+});
+
 app.get("/api/refunds", requireOwner, async (req, res) => {
   const { rows } = await pool.query("SELECT * FROM orders WHERE refund_status != 'none' ORDER BY created_at DESC");
   res.json(rows.map(mapOrder));
 });
 app.post("/api/orders/:id/refund-done", requireOwner, async (req, res) => {
   await pool.query("UPDATE orders SET refund_status = 'done' WHERE id = $1", [req.params.id]);
+  logAdminAction("Remboursement marqué fait", req.params.id);
   res.json({ ok: true });
 });
 
@@ -899,11 +1006,11 @@ app.post("/api/cinetpay/notify", async (req, res) => {
 });
 
 // ==================== AUTH PROPRIÉTAIRE ====================
-app.post("/api/owner/login", (req, res) => {
+app.post("/api/owner/login", async (req, res) => {
   const { code } = req.body;
   if (!OWNER_PASSCODE) return res.status(500).json({ error: "OWNER_PASSCODE non configuré sur le serveur." });
   if (code !== OWNER_PASSCODE) return res.status(401).json({ error: "Code incorrect." });
-  res.json({ token: issueOwnerToken() });
+  res.json({ token: await issueOwnerToken() });
 });
 
 // ==================== Frontend statique ====================
