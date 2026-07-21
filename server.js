@@ -778,6 +778,9 @@ app.get("/api/vendors/risk", requireOwner, async (req, res) => {
       phone: v.phone, name: v.name, suspended: v.suspended, suspendedReason: v.suspended_reason,
       totalOrders: s.total, cancelledOrders: s.annulee, deliveredOrders: s.livree,
       cancelRate: Math.round(cancelRate * 100), openReports, risky,
+      trialStartedAt: v.trial_started_at ? Number(v.trial_started_at) : null,
+      subscriptionStatus: v.subscription_status,
+      subscriptionExpiresAt: v.subscription_expires_at ? Number(v.subscription_expires_at) : null,
     };
   }).sort((a, b) => (b.openReports - a.openReports) || (b.cancelRate - a.cancelRate));
 
@@ -853,6 +856,22 @@ app.post("/api/couriers/:phone/unverify", requireOwner, async (req, res) => {
 app.get("/api/couriers", requireOwner, async (req, res) => {
   const { rows } = await pool.query("SELECT * FROM profiles WHERE role = 'courier' ORDER BY trial_started_at DESC");
   res.json(rows.map(mapProfile));
+});
+
+// Le propriétaire peut accorder manuellement un accès gratuit (essai prolongé)
+// à un vendeur ou un livreur précis — utile pour faire découvrir la plateforme
+// sans attendre un vrai paiement (nouveaux partenaires, démonstration...).
+app.post("/api/access/:role/:phone/grant", requireOwner, async (req, res) => {
+  const { role, phone } = req.params;
+  const days = Number(req.body.days) || 30;
+  if (!["vendor", "courier"].includes(role)) return res.status(400).json({ error: "Rôle invalide." });
+  const expiresAt = Date.now() + days * 24 * 3600 * 1000;
+  await pool.query(
+    "UPDATE profiles SET subscription_status = 'active', subscription_expires_at = $1 WHERE role = $2 AND phone = $3",
+    [expiresAt, role, phone]
+  );
+  logAdminAction("Accès gratuit accordé", `${role} · ${phone}`, `${days} jours`);
+  res.json({ ok: true });
 });
 
 // ==================== REMBOURSEMENTS À TRAITER ====================
