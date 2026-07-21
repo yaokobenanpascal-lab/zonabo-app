@@ -203,3 +203,8 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS courier_lng DOUBLE PRECISION;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS location_updated_at BIGINT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS courier_vehicle_type TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS courier_vehicle_plate TEXT;
+
+-- Plusieurs photos par produit (galerie) — image_url reste la photo de
+-- couverture (affichée sur la carte produit), image_urls contient toutes les
+-- photos dans l'ordre, y compris la première.
+ALTER TABLE products ADD COLUMN IF NOT EXISTS image_urls JSONB DEFAULT '[]';
