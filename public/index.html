@@ -2173,6 +2173,15 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
     await apiSend(`/api/vendors/${encodeURIComponent(phone)}/unsuspend`, "POST", undefined, ownerToken);
     loadRisk();
   }
+  async function grantAccess(role, phone) {
+    const input = prompt("Combien de jours d'accès gratuit accorder ?", "30");
+    if (!input) return;
+    const days = Number(input);
+    if (!days || days <= 0) return;
+    await apiSend(`/api/access/${role}/${encodeURIComponent(phone)}/grant`, "POST", { days }, ownerToken);
+    if (role === "vendor") loadRisk();
+    else loadCouriersAndRefunds();
+  }
   async function markReviewed(reportId) {
     await apiSend(`/api/reports/${reportId}/review`, "POST", undefined, ownerToken);
     loadRisk();
@@ -2456,6 +2465,14 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
               <p className="f-mono text-[10px] text-[#14213D]/50 mt-1">
                 {v.totalOrders} commande(s) · {v.cancelRate}% annulées · {v.openReports} signalement(s) ouvert(s)
               </p>
+              {!v.suspended && (() => {
+                const acc = getAccessState(v, trialDays);
+                return (
+                  <p className={`f-mono text-[10px] mt-1 ${acc.granted ? "text-[#14213D]/40" : "text-[#C1440E]"}`}>
+                    {acc.granted ? `Accès actif · encore ${acc.daysLeft} jour${acc.daysLeft > 1 ? "s" : ""}` : "⚠️ Accès expiré — ne peut plus publier"}
+                  </p>
+                );
+              })()}
               {v.suspended ? (
                 <>
                   {v.suspendedReason && <p className="f-body text-[11px] text-[#14213D]/60 mt-1">Motif : {v.suspendedReason}</p>}
@@ -2470,7 +2487,10 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
                   </div>
                 </div>
               ) : (
-                <button onClick={() => setSuspendReasonFor(v.phone)} className="f-mono text-[10px] bg-[#14213D]/10 text-[#14213D] px-3 py-1.5 rounded-full mt-2">Suspendre</button>
+                <div className="flex gap-2 mt-2">
+                  <button onClick={() => setSuspendReasonFor(v.phone)} className="f-mono text-[10px] bg-[#14213D]/10 text-[#14213D] px-3 py-1.5 rounded-full">Suspendre</button>
+                  <button onClick={() => grantAccess("vendor", v.phone)} className="f-mono text-[10px] bg-[#2D6A4F]/10 text-[#2D6A4F] px-3 py-1.5 rounded-full">🎁 Accès gratuit</button>
+                </div>
               )}
             </div>
           ))}
@@ -2508,17 +2528,26 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
           Vérifie l'identité d'un livreur (ex : pièce d'identité envoyée par WhatsApp), puis coche-le ici — un badge de confiance apparaît alors pour les acheteurs quand ils comparent les propositions de prix.
         </p>
         <div className="space-y-2">
-          {couriers.map((c) => (
+          {couriers.map((c) => {
+            const acc = getAccessState(c, trialDays);
+            return (
             <div key={c.phone} className="flex items-center justify-between rounded-xl px-3 py-2 bg-[#14213D]/5">
               <div>
                 <p className="f-body text-xs text-[#14213D] font-semibold">{c.name || "Sans nom"} <span className="f-mono text-[10px] text-[#14213D]/40">· {c.phone}</span></p>
                 <RatingBadge phone={c.phone} />
+                <p className={`f-mono text-[10px] mt-0.5 ${acc.granted ? "text-[#14213D]/40" : "text-[#C1440E]"}`}>
+                  {acc.granted ? `Accès actif · encore ${acc.daysLeft} jour${acc.daysLeft > 1 ? "s" : ""}` : "⚠️ Accès expiré"}
+                </p>
               </div>
-              <button onClick={() => toggleCourierVerified(c.phone, c.verified)} className={`f-mono text-[10px] px-3 py-1.5 rounded-full ${c.verified ? "bg-[#2D6A4F] text-white" : "bg-[#14213D]/10 text-[#14213D]"}`}>
-                {c.verified ? "✓ Vérifié" : "Marquer vérifié"}
-              </button>
+              <div className="flex gap-2">
+                <button onClick={() => grantAccess("courier", c.phone)} className="f-mono text-[10px] bg-[#2D6A4F]/10 text-[#2D6A4F] px-3 py-1.5 rounded-full whitespace-nowrap">🎁 Accès gratuit</button>
+                <button onClick={() => toggleCourierVerified(c.phone, c.verified)} className={`f-mono text-[10px] px-3 py-1.5 rounded-full whitespace-nowrap ${c.verified ? "bg-[#2D6A4F] text-white" : "bg-[#14213D]/10 text-[#14213D]"}`}>
+                  {c.verified ? "✓ Vérifié" : "Marquer vérifié"}
+                </button>
+              </div>
             </div>
-          ))}
+            );
+          })}
           {couriers.length === 0 && <p className="f-body text-xs text-[#14213D]/40">Aucun livreur inscrit pour l'instant.</p>}
         </div>
       </div>
