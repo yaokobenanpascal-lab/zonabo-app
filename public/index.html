@@ -456,7 +456,10 @@ function CourierTrackingCard({ order }) {
 }
 
 function ReceiptModal({ order, vendorName, vendorPhone, onClose }) {
-  const myItems = order.items.filter((it) => it.vendorPhone === vendorPhone);
+  // Sans vendorPhone : vue acheteur (tous les articles, tous vendeurs confondus,
+  // total payé). Avec vendorPhone : vue vendeur (ses articles, part nette après commission).
+  const isVendorView = !!vendorPhone;
+  const myItems = isVendorView ? order.items.filter((it) => it.vendorPhone === vendorPhone) : order.items;
   const subtotal = myItems.reduce((s, it) => s + it.price * it.qty, 0);
   const commission = subtotal * (order.feeRate ?? 0);
   const net = subtotal - commission;
@@ -471,9 +474,10 @@ function ReceiptModal({ order, vendorName, vendorPhone, onClose }) {
           <div className="border-t border-b border-dashed border-[#14213D]/20 py-3 mb-3 space-y-1">
             <p className="f-mono text-[11px] text-[#14213D]/60">N° commande : #{order.id.slice(-6)}</p>
             <p className="f-mono text-[11px] text-[#14213D]/60">Date : {new Date(order.createdAt).toLocaleString("fr-FR")}</p>
-            <p className="f-mono text-[11px] text-[#14213D]/60">Vendeur : {vendorName}</p>
+            {isVendorView && <p className="f-mono text-[11px] text-[#14213D]/60">Vendeur : {vendorName}</p>}
             <p className="f-mono text-[11px] text-[#14213D]/60">Acheteur : {order.buyerName} · {order.buyerPhone}</p>
             <p className="f-mono text-[11px] text-[#14213D]/60">Zone de livraison : {order.zone}</p>
+            {!isVendorView && order.courierName && <p className="f-mono text-[11px] text-[#14213D]/60">Livreur : {order.courierName}</p>}
           </div>
           <table className="w-full text-sm mb-3">
             <thead>
@@ -494,9 +498,20 @@ function ReceiptModal({ order, vendorName, vendorPhone, onClose }) {
             </tbody>
           </table>
           <div className="border-t border-dashed border-[#14213D]/20 pt-3 space-y-1">
-            <div className="flex justify-between f-body text-sm text-[#14213D]"><span>Sous-total</span><span>{subtotal.toLocaleString("fr-FR")} F</span></div>
-            <div className="flex justify-between f-body text-xs text-[#14213D]/50"><span>Commission Zonako ({Math.round((order.feeRate ?? 0) * 100)}%)</span><span>-{Math.round(commission).toLocaleString("fr-FR")} F</span></div>
-            <div className="flex justify-between f-display font-semibold text-base text-[#2D6A4F] pt-1"><span>Net vendeur</span><span>{Math.round(net).toLocaleString("fr-FR")} F</span></div>
+            {isVendorView ? (
+              <>
+                <div className="flex justify-between f-body text-sm text-[#14213D]"><span>Sous-total</span><span>{subtotal.toLocaleString("fr-FR")} F</span></div>
+                <div className="flex justify-between f-body text-xs text-[#14213D]/50"><span>Commission Zonako ({Math.round((order.feeRate ?? 0) * 100)}%)</span><span>-{Math.round(commission).toLocaleString("fr-FR")} F</span></div>
+                <div className="flex justify-between f-display font-semibold text-base text-[#2D6A4F] pt-1"><span>Net vendeur</span><span>{Math.round(net).toLocaleString("fr-FR")} F</span></div>
+              </>
+            ) : (
+              <>
+                <div className="flex justify-between f-body text-sm text-[#14213D]"><span>Articles</span><span>{subtotal.toLocaleString("fr-FR")} F</span></div>
+                {order.deliveryFee > 0 && <div className="flex justify-between f-body text-sm text-[#14213D]"><span>Livraison</span><span>{order.deliveryFee.toLocaleString("fr-FR")} F</span></div>}
+                <div className="flex justify-between f-display font-semibold text-base text-[#2D6A4F] pt-1"><span>Total payé</span><span>{order.total.toLocaleString("fr-FR")} F</span></div>
+                <p className="f-mono text-[9px] text-[#14213D]/40 pt-1">Mode de paiement : {order.paymentMethod === "cinetpay" ? "Mobile Money / Carte" : "À la livraison"}</p>
+              </>
+            )}
           </div>
           <p className="f-mono text-[9px] text-[#14213D]/30 text-center mt-4">Merci pour votre confiance — Zonako</p>
         </div>
@@ -962,6 +977,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
   const [search, setSearch] = useState("");
   const [visibleCount, setVisibleCount] = useState(20);
   const [galleryProduct, setGalleryProduct] = useState(null);
+  const [receiptOrder, setReceiptOrder] = useState(null);
   const [view, setView] = useState("browse"); // browse | orders
 
   const [deliveryZone, setDeliveryZone] = useState("");
@@ -1234,6 +1250,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                   {o.paid ? "✓ Payé en ligne" : "À payer à la livraison"}
                 </span>
               </div>
+              <button onClick={() => setReceiptOrder(o)} className="f-mono text-[10px] text-[#14213D]/40 hover:text-[#14213D] underline mt-1">🧾 Voir / imprimer le reçu</button>
               {o.shippingMethod === "transport" && (
                 <p className="f-mono text-[10px] text-[#14213D]/50 mt-1">
                   🚌 {o.transportCompany ? `${o.transportCompany} · Suivi: ${o.trackingNumber || "en attente"}` : "En attente de prise en charge par le vendeur"}
@@ -1441,6 +1458,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
         </div>
       )}
       {galleryProduct && <ProductGalleryModal product={galleryProduct} onClose={() => setGalleryProduct(null)} />}
+      {receiptOrder && <ReceiptModal order={receiptOrder} onClose={() => setReceiptOrder(null)} />}
     </div>
   );
 }
