@@ -157,6 +157,7 @@ function mapProduct(r) {
     stock: r.stock, imageUrl: r.image_url, deliveryTime: r.delivery_time,
     vendorName: r.vendor_name, vendorPhone: r.vendor_phone, createdAt: Number(r.created_at),
     description: r.description || "", vendorLandmark: r.vendor_landmark || "",
+    imageUrls: r.image_urls && r.image_urls.length ? r.image_urls : (r.image_url ? [r.image_url] : []),
   };
 }
 function mapOrder(r) {
@@ -354,10 +355,13 @@ app.post("/api/products", requirePhone((req) => req.body.vendorPhone), async (re
   const createdAt = Date.now();
   // Le point de repère : celui donné pour ce produit, sinon celui par défaut du profil vendeur.
   const landmark = p.vendorLandmark || prof[0]?.landmark || "";
+  // Jusqu'à 5 photos par produit. La première sert de photo de couverture (image_url).
+  const imageUrls = Array.isArray(p.imageUrls) ? p.imageUrls.slice(0, 5) : (p.imageUrl ? [p.imageUrl] : []);
+  const coverImage = imageUrls[0] || p.imageUrl || "";
   await pool.query(
-    `INSERT INTO products (id, name, price, category, zone, stock, image_url, delivery_time, vendor_name, vendor_phone, created_at, description, vendor_landmark)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-    [id, p.name, p.price, p.category, p.zone, p.stock || 0, p.imageUrl || "", p.deliveryTime || "Non précisé", p.vendorName, p.vendorPhone, createdAt, p.description || "", landmark]
+    `INSERT INTO products (id, name, price, category, zone, stock, image_url, delivery_time, vendor_name, vendor_phone, created_at, description, vendor_landmark, image_urls)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+    [id, p.name, p.price, p.category, p.zone, p.stock || 0, coverImage, p.deliveryTime || "Non précisé", p.vendorName, p.vendorPhone, createdAt, p.description || "", landmark, JSON.stringify(imageUrls)]
   );
   const { rows } = await pool.query("SELECT * FROM products WHERE id = $1", [id]);
   res.json(mapProduct(rows[0]));
@@ -375,9 +379,15 @@ app.patch("/api/products/:id", async (req, res) => {
   if (patch.price !== undefined) { sets.push(`price = $${i++}`); vals.push(patch.price); }
   if (patch.stock !== undefined) { sets.push(`stock = $${i++}`); vals.push(patch.stock); }
   if (patch.deliveryTime !== undefined) { sets.push(`delivery_time = $${i++}`); vals.push(patch.deliveryTime); }
-  if (patch.imageUrl !== undefined) { sets.push(`image_url = $${i++}`); vals.push(patch.imageUrl); }
   if (patch.description !== undefined) { sets.push(`description = $${i++}`); vals.push(patch.description); }
   if (patch.vendorLandmark !== undefined) { sets.push(`vendor_landmark = $${i++}`); vals.push(patch.vendorLandmark); }
+  if (Array.isArray(patch.imageUrls)) {
+    const imageUrls = patch.imageUrls.slice(0, 5);
+    sets.push(`image_urls = $${i++}`); vals.push(JSON.stringify(imageUrls));
+    sets.push(`image_url = $${i++}`); vals.push(imageUrls[0] || "");
+  } else if (patch.imageUrl !== undefined) {
+    sets.push(`image_url = $${i++}`); vals.push(patch.imageUrl);
+  }
   if (sets.length === 0) return res.status(400).json({ error: "Rien à mettre à jour." });
   vals.push(req.params.id);
   await pool.query(`UPDATE products SET ${sets.join(", ")} WHERE id = $${i}`, vals);
