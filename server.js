@@ -176,6 +176,10 @@ function mapOrder(r) {
     locationUpdatedAt: r.location_updated_at ? Number(r.location_updated_at) : null,
     courierVehicleType: r.courier_vehicle_type || "",
     courierVehiclePlate: r.courier_vehicle_plate || "",
+    transportFee: r.transport_fee !== null && r.transport_fee !== undefined ? Number(r.transport_fee) : null,
+    transportProposedBy: r.transport_proposed_by || null,
+    transportConfirmedByBuyer: r.transport_confirmed_by_buyer || false,
+    transportConfirmedByVendor: r.transport_confirmed_by_vendor || false,
   };
 }
 function mapProfile(r) {
@@ -434,13 +438,19 @@ app.post("/api/orders", requirePhone((req) => req.body.buyerPhone), async (req, 
     // "paid" n'est JAMAIS pris depuis le corps de la requête : une commande démarre
     // toujours non payée. Pour CinetPay, c'est /api/cinetpay/notify (après vérification
     // auprès de CinetPay) qui la marquera payée — voir plus bas.
+    // Si l'acheteur choisit l'expédition par compagnie de transport et propose une
+    // compagnie, c'est enregistré comme sa proposition initiale — le vendeur devra
+    // la confirmer (avec des frais) ou en proposer une autre.
+    const initialTransportCompany = o.shippingMethod === "transport" && o.transportCompany ? o.transportCompany : null;
     await client.query(
       `INSERT INTO orders (id, buyer_name, buyer_phone, zone, items, total, delivery_fee, fee_rate, commission, status,
          courier_name, courier_phone, created_at, payment_method, paid, cinetpay_transaction_id, shipping_method,
-         transport_company, tracking_number, courier_bids, courier_confirmed, buyer_confirmed)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'nouvelle',NULL,NULL,$10,$11,false,$12,$13,NULL,NULL,'[]',false,false)`,
+         transport_company, tracking_number, courier_bids, courier_confirmed, buyer_confirmed,
+         transport_proposed_by, transport_confirmed_by_buyer)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'nouvelle',NULL,NULL,$10,$11,false,$12,$13,$14,NULL,'[]',false,false,$15,$16)`,
       [id, o.buyerName, o.buyerPhone, o.zone, JSON.stringify(o.items || []), o.total, o.deliveryFee || 0, feeRate, commission,
-        createdAt, o.paymentMethod || "cod", o.cinetpayTransactionId || null, o.shippingMethod || "livreur"]
+        createdAt, o.paymentMethod || "cod", o.cinetpayTransactionId || null, o.shippingMethod || "livreur",
+        initialTransportCompany, initialTransportCompany ? "buyer" : null, !!initialTransportCompany]
     );
     if (o.clientKey) {
       await client.query(
@@ -578,6 +588,65 @@ app.post("/api/orders/:id/confirm-buyer", async (req, res) => {
   );
   const { rows: r2 } = await pool.query("SELECT * FROM orders WHERE id = $1", [req.params.id]);
   res.json(mapOrder(r2[0]));
+});
+
+// ==================== NÉGOCIATION COMPAGNIE DE TRANSPORT ====================
+// L'acheteur propose une compagnie à la commande (voir création). Ensuite,
+// acheteur et vendeur peuvent chacun "proposer" (changer la compagnie et/ou
+// les frais — seul le vendeur peut fixer des frais) ou "confirmer" la
+// proposition en cours de l'autre, jusqu'à accord des deux côtés.
+app.post("/api/orders/:id/transport-propose", requirePhone((req) => req.body.phone), async (req, res) => {
+  const { rows } = await pool.query("SELECT * FROM orders WHERE id = $1", [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: "Commande introuvable." });
+  const order = rows[0];
+  const phone = req.body.phone;
+  const isBuyer = phone === order.buyer_phone;
+  const isVendor = (order.items || []).some((it) => it.vendorPhone === phone);
+  if (!isBuyer && !isVendor) return res.status(403).json({ error: "Non autorisé sur cette commande." });
+  const role = isBuyer ? "buyer" : "vendor";
+  const company = (req.body.company || "").trim();
+  if (!company) return res.status(400).json({ error: "Indique une compagnie de transport." });
+  let fee = order.transport_fee;
+  if (role === "vendor") {
+    if (req.body.fee === undefined || req.body.fee === null || Number(req.body.fee) < 0) {
+      return res.status(400).json({ error: "Indique des frais d'expédition." });
+    }
+    fee = Number(req.body.fee);
+  } else {
+    fee = null; // l'acheteur propose une compagnie, pas des frais — le vendeur les fixera
+  }
+  await pool.query(
+    `UPDATE orders SET transport_company = $1, transport_fee = $2, transport_proposed_by = $3,
+       transport_confirmed_by_buyer = $4, transport_confirmed_by_vendor = $5 WHERE id = $6`,
+    [company, fee, role, role === "buyer", role === "vendor", req.params.id]
+  );
+  const { rows: r2 } = await pool.query("SELECT * FROM orders WHERE id = $1", [req.params.id]);
+  res.json(mapOrder(r2[0]));
+});
+app.post("/api/orders/:id/transport-confirm", requirePhone((req) => req.body.phone), async (req, res) => {
+  const { rows } = await pool.query("SELECT * FROM orders WHERE id = $1", [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: "Commande introuvable." });
+  const order = rows[0];
+  const phone = req.body.phone;
+  const isBuyer = phone === order.buyer_phone;
+  const isVendor = (order.items || []).some((it) => it.vendorPhone === phone);
+  if (!isBuyer && !isVendor) return res.status(403).json({ error: "Non autorisé sur cette commande." });
+  const role = isBuyer ? "buyer" : "vendor";
+  if (!order.transport_company) return res.status(400).json({ error: "Aucune proposition à confirmer pour l'instant." });
+  if (order.transport_proposed_by === role) return res.status(400).json({ error: "Tu ne peux pas confirmer ta propre proposition — attends la réponse de l'autre partie." });
+  if (role === "buyer" && (order.transport_fee === null || order.transport_fee === undefined)) {
+    return res.status(400).json({ error: "Le vendeur n'a pas encore fixé les frais d'expédition." });
+  }
+  const field = role === "buyer" ? "transport_confirmed_by_buyer" : "transport_confirmed_by_vendor";
+  await pool.query(`UPDATE orders SET ${field} = true WHERE id = $1`, [req.params.id]);
+  const { rows: r2 } = await pool.query("SELECT * FROM orders WHERE id = $1", [req.params.id]);
+  const updated = r2[0];
+  // Accord des deux côtés : les frais négociés deviennent les frais de livraison officiels de la commande.
+  if (updated.transport_confirmed_by_buyer && updated.transport_confirmed_by_vendor) {
+    await pool.query("UPDATE orders SET delivery_fee = $1 WHERE id = $2", [Number(updated.transport_fee) || 0, req.params.id]);
+  }
+  const { rows: r3 } = await pool.query("SELECT * FROM orders WHERE id = $1", [req.params.id]);
+  res.json(mapOrder(r3[0]));
 });
 
 // ==================== PROFILS (vendeur / livreur) ====================
