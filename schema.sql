@@ -216,3 +216,22 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS transport_fee NUMERIC;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS transport_proposed_by TEXT; -- 'buyer' ou 'vendor'
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS transport_confirmed_by_buyer BOOLEAN DEFAULT false;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS transport_confirmed_by_vendor BOOLEAN DEFAULT false;
+
+-- Adresse / point de repère de l'acheteur pour cette commande — affichée sur le
+-- bon de commande du vendeur (comme le point de repère du vendeur l'est pour l'acheteur).
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS buyer_address TEXT;
+
+-- Numéro de commande auto-incrémenté (1, 2, 3...) — utilisé pour numéroter les
+-- reçus/bons de commande de façon lisible (syllabe du nom + ce compteur),
+-- plutôt qu'un identifiant technique.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_seq SERIAL;
+
+-- Espace notes/tâches partagé de l'équipe propriétaire — accessible avec le
+-- même code propriétaire, pour préparer l'arrivée de futurs collaborateurs.
+CREATE TABLE IF NOT EXISTS owner_notes (
+  id TEXT PRIMARY KEY,
+  text TEXT NOT NULL,
+  done BOOLEAN NOT NULL DEFAULT false,
+  created_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_owner_notes_date ON owner_notes(created_at DESC);
