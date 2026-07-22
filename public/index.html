@@ -1379,8 +1379,20 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
               {o.shippingMethod === "transport" && (
                 <>
                   <TransportNegotiationCard order={o} viewerRole="buyer" viewerPhone={buyerInfo.phone} onPropose={proposeTransport} onConfirm={confirmTransport} />
-                  {o.transportConfirmedByBuyer && o.transportConfirmedByVendor && (
-                    <p className="f-mono text-[10px] text-[#14213D]/50 mt-1">Suivi : {o.trackingNumber || "en attente que le vendeur l'envoie au transporteur"}</p>
+                  {o.transportConfirmedByBuyer && o.transportConfirmedByVendor && o.status === "confirmee" && (
+                    <p className="f-mono text-[10px] text-[#14213D]/50 mt-1">En attente que le vendeur remette le colis à {o.transportCompany}.</p>
+                  )}
+                  {o.status === "en_transit" && (
+                    <div className="mt-1">
+                      <p className="f-mono text-[10px] text-[#14213D]/50">🚌 {o.transportCompany} · Suivi : {o.trackingNumber || "en attente du numéro"}</p>
+                      <p className="f-body text-[11px] text-[#14213D]/40 mt-0.5">Récupère ton colis à l'agence {o.transportCompany} de {o.zone}, puis confirme ci-dessous.</p>
+                      <button onClick={() => confirmDeliveryByBuyer(o.id)} className="w-full f-mono text-xs bg-[#2D6A4F] text-white py-1.5 rounded-full mt-1.5">
+                        J'ai récupéré mon colis
+                      </button>
+                    </div>
+                  )}
+                  {o.status === "livree" && (
+                    <p className="f-mono text-[10px] text-[#2D6A4F] mt-1">✓ Colis récupéré — merci !</p>
                   )}
                 </>
               )}
@@ -2038,7 +2050,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                   {o.status === "en_transit" && o.shippingMethod === "transport" && (
                     <div className="mt-3 pt-3 border-t border-dashed border-[#14213D]/10 space-y-1.5">
                       <p className="f-mono text-[11px] text-[#3B6FA0]">🚌 {o.transportCompany} · Suivi : {o.trackingNumber || "—"}</p>
-                      <button onClick={() => updateStatus(o.id, "livree")} className="w-full f-mono text-xs bg-[#2D6A4F] text-white py-1.5 rounded-full">Marquer récupérée par le client</button>
+                      <p className="f-body text-[11px] text-[#14213D]/40">En attente que {o.buyerName} confirme avoir récupéré le colis à l'agence.</p>
                     </div>
                   )}
                 </div>
