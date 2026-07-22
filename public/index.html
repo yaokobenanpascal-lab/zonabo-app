@@ -424,16 +424,25 @@ function ProductGalleryModal({ product, onClose }) {
 // Négociation de la compagnie de transport entre acheteur et vendeur —
 // utilisée des deux côtés (viewerRole indique qui regarde l'écran).
 function TransportNegotiationCard({ order, viewerRole, viewerPhone, onPropose, onConfirm }) {
-  const [showCounter, setShowCounter] = useState(false);
-  const [companyDraft, setCompanyDraft] = useState("");
-  const [feeDraft, setFeeDraft] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [companyDraft, setCompanyDraft] = useState(order.transportCompany || "");
+  const [feeDraft, setFeeDraft] = useState(order.transportFee !== null ? String(order.transportFee) : "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   const settled = order.transportConfirmedByBuyer && order.transportConfirmedByVendor;
   const theirTurn = order.transportProposedBy && order.transportProposedBy !== viewerRole; // c'est à viewerRole de répondre
   const waitingOnOther = order.transportProposedBy === viewerRole && !settled;
+  // Seul le vendeur fixe les frais — si personne n'en a encore mis, c'est forcément
+  // à lui de le faire avant que quoi que ce soit puisse être confirmé.
+  const needsFee = theirTurn && order.transportFee === null;
 
+  function startEditing() {
+    setCompanyDraft(order.transportCompany || "");
+    setFeeDraft(order.transportFee !== null ? String(order.transportFee) : "");
+    setError("");
+    setEditing(true);
+  }
   async function handleConfirm() {
     setBusy(true);
     setError("");
@@ -451,9 +460,7 @@ function TransportNegotiationCard({ order, viewerRole, viewerPhone, onPropose, o
     setError("");
     try {
       await onPropose(order.id, viewerPhone, companyDraft.trim(), viewerRole === "vendor" ? Number(feeDraft) : undefined);
-      setShowCounter(false);
-      setCompanyDraft("");
-      setFeeDraft("");
+      setEditing(false);
     } catch (e) {
       setError(e.message || "Erreur pendant la proposition.");
     }
@@ -470,27 +477,29 @@ function TransportNegotiationCard({ order, viewerRole, viewerPhone, onPropose, o
       ) : (
         <>
           <p className="f-body text-sm text-[#14213D]">
-            {order.transportCompany}{order.transportFee !== null ? ` — ${order.transportFee.toLocaleString("fr-FR")} F` : ""}
+            {order.transportCompany}{order.transportFee !== null ? ` — ${order.transportFee.toLocaleString("fr-FR")} F` : " — frais non fixés"}
             <span className="f-mono text-[10px] text-[#14213D]/40"> · proposé par {order.transportProposedBy === viewerRole ? "toi" : (viewerRole === "buyer" ? "le vendeur" : "l'acheteur")}</span>
           </p>
           {waitingOnOther && <p className="f-body text-xs text-[#14213D]/40 mt-1">En attente de la réponse de {viewerRole === "buyer" ? "le vendeur" : "l'acheteur"}…</p>}
-          {theirTurn && !showCounter && (
+          {theirTurn && !editing && (
             <div className="flex gap-2 mt-2">
-              {order.transportFee !== null && (
-                <button disabled={busy} onClick={handleConfirm} className="flex-1 f-mono text-xs bg-[#2D6A4F] text-white py-1.5 rounded-full">{busy ? "…" : "Confirmer"}</button>
+              {!needsFee && (
+                <button disabled={busy} onClick={handleConfirm} className="flex-1 f-mono text-xs bg-[#2D6A4F] text-white py-1.5 rounded-full">{busy ? "…" : "✅ Accepter"}</button>
               )}
-              <button onClick={() => setShowCounter(true)} className="flex-1 f-mono text-xs bg-[#14213D]/10 text-[#14213D] py-1.5 rounded-full">Proposer une autre compagnie</button>
+              <button onClick={startEditing} className="flex-1 f-mono text-xs bg-[#14213D]/10 text-[#14213D] py-1.5 rounded-full">
+                {needsFee ? "Fixer les frais d'expédition" : "Proposer une autre compagnie"}
+              </button>
             </div>
           )}
-          {theirTurn && showCounter && (
+          {theirTurn && editing && (
             <div className="mt-2 space-y-1.5">
               <input placeholder="Nom de la compagnie" value={companyDraft} onChange={(e) => setCompanyDraft(e.target.value)} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
               {viewerRole === "vendor" && (
                 <input type="number" placeholder="Frais d'expédition (FCFA)" value={feeDraft} onChange={(e) => setFeeDraft(e.target.value)} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
               )}
               <div className="flex gap-2">
-                <button disabled={busy || !companyDraft.trim()} onClick={handlePropose} className="flex-1 f-mono text-xs bg-[#F2A93B] text-[#14213D] py-1.5 rounded-full disabled:opacity-40">{busy ? "…" : "Envoyer la proposition"}</button>
-                <button onClick={() => setShowCounter(false)} className="flex-1 f-mono text-xs bg-[#14213D]/10 text-[#14213D] py-1.5 rounded-full">Annuler</button>
+                <button disabled={busy || !companyDraft.trim()} onClick={handlePropose} className="flex-1 f-mono text-xs bg-[#F2A93B] text-[#14213D] py-1.5 rounded-full disabled:opacity-40">{busy ? "…" : needsFee ? "Valider" : "Envoyer la proposition"}</button>
+                <button onClick={() => setEditing(false)} className="flex-1 f-mono text-xs bg-[#14213D]/10 text-[#14213D] py-1.5 rounded-full">Annuler</button>
               </div>
             </div>
           )}
@@ -535,6 +544,12 @@ function CourierTrackingCard({ order }) {
   );
 }
 
+// Génère un repère court à partir d'un nom (ex: "Kobenan" → "KOB") pour préfixer
+// les numéros de reçu/bon de commande — plus lisible qu'un identifiant technique.
+function nameSyllable(name) {
+  const letters = (name || "").replace(/[^a-zA-ZÀ-ÿ]/g, "");
+  return (letters.slice(0, 3) || "ZKO").toUpperCase();
+}
 function ReceiptModal({ order, vendorName, vendorPhone, onClose }) {
   // Sans vendorPhone : vue acheteur (tous les articles, tous vendeurs confondus,
   // total payé). Avec vendorPhone : vue vendeur (ses articles, part nette après commission).
@@ -543,21 +558,46 @@ function ReceiptModal({ order, vendorName, vendorPhone, onClose }) {
   const subtotal = myItems.reduce((s, it) => s + it.price * it.qty, 0);
   const commission = subtotal * (order.feeRate ?? 0);
   const net = subtotal - commission;
+  // Numérotation : côté acheteur, le numéro commence par une syllabe du nom du
+  // vendeur ; côté vendeur (bon de commande), par une syllabe du nom de l'acheteur.
+  // Les chiffres viennent d'un compteur automatique (1, 2, 3...), pas de l'heure.
+  const seqPart = order.orderSeq ? String(order.orderSeq).padStart(6, "0") : order.id.slice(-6);
+  const displayNumber = isVendorView
+    ? `${nameSyllable(order.buyerName)}-${seqPart}`
+    : `${nameSyllable(vendorName || order.items[0]?.vendorName)}-${seqPart}`;
+  const vendorAddress = order.items[0]?.vendorLandmark || "";
   return (
     <div className="fixed inset-0 bg-[#14213D]/60 z-50 flex items-center justify-center p-4">
       <div className="bg-white rounded-2xl max-w-sm w-full max-h-[90vh] overflow-y-auto">
         <div className="receipt-print p-6">
           <div className="text-center mb-4">
             <p className="f-display font-bold text-lg text-[#14213D]">Zonako</p>
-            <p className="f-mono text-[10px] text-[#14213D]/50">Reçu de commande</p>
+            <p className="f-mono text-[10px] text-[#14213D]/50">{isVendorView ? "Bon de commande" : "Reçu de commande"}</p>
           </div>
           <div className="border-t border-b border-dashed border-[#14213D]/20 py-3 mb-3 space-y-1">
-            <p className="f-mono text-[11px] text-[#14213D]/60">N° commande : #{order.id.slice(-6)}</p>
+            <p className="f-mono text-[11px] text-[#14213D]/60">N° : {displayNumber}</p>
             <p className="f-mono text-[11px] text-[#14213D]/60">Date : {new Date(order.createdAt).toLocaleString("fr-FR")}</p>
-            {isVendorView && <p className="f-mono text-[11px] text-[#14213D]/60">Vendeur : {vendorName}</p>}
-            <p className="f-mono text-[11px] text-[#14213D]/60">Acheteur : {order.buyerName} · {order.buyerPhone}</p>
-            <p className="f-mono text-[11px] text-[#14213D]/60">Zone de livraison : {order.zone}</p>
-            {!isVendorView && order.courierName && <p className="f-mono text-[11px] text-[#14213D]/60">Livreur : {order.courierName}</p>}
+            {isVendorView ? (
+              <>
+                <p className="f-mono text-[11px] text-[#14213D]/60">Acheteur : {order.buyerName} · {order.buyerPhone}</p>
+                <p className="f-mono text-[11px] text-[#14213D]/60">Zone de livraison : {order.zone}</p>
+                {order.buyerAddress && <p className="f-mono text-[11px] text-[#14213D]/60">Adresse / repère : {order.buyerAddress}</p>}
+              </>
+            ) : (
+              <>
+                <p className="f-mono text-[11px] text-[#14213D]/60">Vendeur : {vendorName || order.items[0]?.vendorName}</p>
+                {vendorAddress && <p className="f-mono text-[11px] text-[#14213D]/60">Adresse / repère vendeur : {vendorAddress}</p>}
+                <p className="f-mono text-[11px] text-[#14213D]/60">Acheteur : {order.buyerName} · {order.buyerPhone}</p>
+                <p className="f-mono text-[11px] text-[#14213D]/60">Zone de livraison : {order.zone}</p>
+                {order.courierName && <p className="f-mono text-[11px] text-[#14213D]/60">Livreur : {order.courierName}</p>}
+                {order.shippingMethod === "transport" && order.transportCompany && (
+                  <p className="f-mono text-[11px] text-[#14213D]/60">
+                    Compagnie de transport : {order.transportCompany}
+                    {order.transportConfirmedByBuyer && order.transportConfirmedByVendor ? " (confirmée)" : " (en négociation)"}
+                  </p>
+                )}
+              </>
+            )}
           </div>
           <table className="w-full text-sm mb-3">
             <thead>
@@ -1063,6 +1103,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
   const [deliveryZone, setDeliveryZone] = useState("");
   const [shippingMethod, setShippingMethod] = useState("livreur"); // "livreur" | "transport"
   const [preferredTransportCompany, setPreferredTransportCompany] = useState("");
+  const [buyerAddress, setBuyerAddress] = useState("");
   const [paymentMethod, setPaymentMethod] = useState("cinetpay"); // "cinetpay" | "cod"
   const [payProcessing, setPayProcessing] = useState(false);
   const [payError, setPayError] = useState("");
@@ -1158,8 +1199,9 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
       // La commande est créée tout de suite, non payée — c'est /api/cinetpay/notify
       // (vérifié auprès de CinetPay côté serveur) qui la marquera payée. Si le
       // paiement échoue, on annule automatiquement cette commande.
-      const order = await placeOrder(total, 0, deliveryZone, { paymentMethod: "cinetpay" }, shippingMethod, preferredTransportCompany);
+      const order = await placeOrder(total, 0, deliveryZone, { paymentMethod: "cinetpay" }, shippingMethod, preferredTransportCompany, buyerAddress);
       setPreferredTransportCompany("");
+      setBuyerAddress("");
       const transactionId = `ZK-${order.id}`;
       await apiSend("/api/payments/pending", "POST", { transactionId, kind: "order", orderId: order.id, amount: total }, getPhoneToken(buyerInfo.phone));
 
@@ -1210,8 +1252,8 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
     setPayError("");
     if (paymentMethod === "cod") {
       setPayProcessing(true);
-      placeOrder(total, 0, deliveryZone, { paymentMethod: "cod" }, shippingMethod, preferredTransportCompany)
-        .then(() => setPreferredTransportCompany(""))
+      placeOrder(total, 0, deliveryZone, { paymentMethod: "cod" }, shippingMethod, preferredTransportCompany, buyerAddress)
+        .then(() => { setPreferredTransportCompany(""); setBuyerAddress(""); })
         .catch((e) => setPayError(e.message || "Erreur pendant la commande. Réessaie."))
         .finally(() => setPayProcessing(false));
     } else {
@@ -1501,6 +1543,12 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                     )}
                   </div>
                   <ZonePicker value={deliveryZone} onChange={setDeliveryZone} label={shippingMethod === "transport" ? "Ville de destination" : "Zone de livraison (précise)"} />
+                  <input
+                    placeholder="Adresse / point de repère précis pour te trouver (optionnel)"
+                    value={buyerAddress}
+                    onChange={(e) => setBuyerAddress(e.target.value)}
+                    className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#F2A93B]"
+                  />
                   <div className="space-y-1">
                     <div className="flex items-center justify-between">
                       <span className="f-body text-xs text-[#14213D]/50">Sous-total articles</span>
@@ -1955,15 +2003,20 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                   {o.shippingMethod === "livreur" && o.courierName && <CourierTrackingCard order={o} />}
                   <button onClick={() => setReceiptOrder(o)} className="f-mono text-[10px] text-[#14213D]/40 hover:text-[#14213D] underline mt-1.5">🧾 Voir / imprimer le reçu</button>
                   {o.status === "nouvelle" && (
-                    <div className="flex gap-2 mt-3 pt-3 border-t border-dashed border-[#14213D]/10">
-                      <button onClick={() => confirmOrder(o.id)} className="flex-1 f-mono text-xs bg-[#2D6A4F] text-white py-1.5 rounded-full">Confirmer la commande</button>
-                      <button onClick={() => cancelOrder(o.id)} className="flex-1 f-mono text-xs bg-[#C1440E]/10 text-[#C1440E] py-1.5 rounded-full">Annuler</button>
+                    <div className="mt-3 pt-3 border-t border-dashed border-[#14213D]/10">
+                      {o.shippingMethod === "transport" && o.transportCompany && (
+                        <p className="f-body text-[11px] text-[#14213D]/50 mb-2">🚌 L'acheteur propose "{o.transportCompany}" pour l'expédition — confirme d'abord la commande pour pouvoir répondre à ce sujet.</p>
+                      )}
+                      <div className="flex gap-2">
+                        <button onClick={() => confirmOrder(o.id)} className="flex-1 f-mono text-xs bg-[#2D6A4F] text-white py-1.5 rounded-full">Confirmer la commande</button>
+                        <button onClick={() => cancelOrder(o.id)} className="flex-1 f-mono text-xs bg-[#C1440E]/10 text-[#C1440E] py-1.5 rounded-full">Annuler</button>
+                      </div>
                     </div>
                   )}
-                  {o.status === "confirmee" && o.shippingMethod === "transport" && (
+                  {o.shippingMethod === "transport" && o.status !== "livree" && o.status !== "annulee" && (
                     <div className="mt-3 pt-3 border-t border-dashed border-[#14213D]/10 space-y-2">
                       <TransportNegotiationCard order={o} viewerRole="vendor" viewerPhone={vendorInfo.phone} onPropose={proposeTransport} onConfirm={confirmTransport} />
-                      {o.transportConfirmedByBuyer && o.transportConfirmedByVendor && (
+                      {o.status === "confirmee" && o.transportConfirmedByBuyer && o.transportConfirmedByVendor && (
                         <>
                           <p className="f-body text-[11px] text-[#14213D]/50">Remets le colis à {o.transportCompany} vers {o.zone}, puis renseigne le numéro de suivi pour que {o.buyerName} puisse récupérer sa commande.</p>
                           <input
@@ -2381,6 +2434,46 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
   const [refunds, setRefunds] = useState([]);
   const [adminActions, setAdminActions] = useState([]);
   const [showAdminLog, setShowAdminLog] = useState(false);
+  const [notes, setNotes] = useState([]);
+  const [showNotes, setShowNotes] = useState(false);
+  const [noteDraft, setNoteDraft] = useState("");
+  const [notesBusy, setNotesBusy] = useState(false);
+
+  async function loadNotes() {
+    try {
+      setNotes(await apiSend("/api/owner-notes", "GET", undefined, ownerToken));
+    } catch (e) {
+      console.error("Erreur de chargement des notes:", e);
+    }
+  }
+  async function addNote() {
+    if (!noteDraft.trim()) return;
+    setNotesBusy(true);
+    try {
+      await apiSend("/api/owner-notes", "POST", { text: noteDraft.trim() }, ownerToken);
+      setNoteDraft("");
+      loadNotes();
+    } catch (e) {
+      alert(e.message || "Impossible d'ajouter la note.");
+    }
+    setNotesBusy(false);
+  }
+  async function toggleNote(id, done) {
+    setNotes((prev) => prev.map((n) => (n.id === id ? { ...n, done } : n))); // optimiste
+    try {
+      await apiSend(`/api/owner-notes/${id}`, "PATCH", { done }, ownerToken);
+    } catch {
+      loadNotes(); // échec : on resynchronise avec le serveur
+    }
+  }
+  async function deleteNote(id) {
+    setNotes((prev) => prev.filter((n) => n.id !== id));
+    try {
+      await apiSend(`/api/owner-notes/${id}`, "DELETE", undefined, ownerToken);
+    } catch {
+      loadNotes();
+    }
+  }
 
   async function loadCouriersAndRefunds() {
     try {
@@ -2576,6 +2669,40 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
                 <span className="f-mono text-[10px] text-[#14213D]/30 whitespace-nowrap ml-2">{new Date(a.createdAt).toLocaleString("fr-FR")}</span>
               </div>
             ))}
+          </div>
+        )}
+      </div>
+
+      <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
+        <div className="flex items-center justify-between">
+          <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60">Notes & tâches (équipe)</p>
+          <button onClick={() => { setShowNotes((s) => !s); if (!showNotes) loadNotes(); }} className="f-mono text-[10px] text-[#14213D]/40 hover:text-[#14213D] underline">
+            {showNotes ? "Masquer" : "Afficher"}
+          </button>
+        </div>
+        <p className="f-body text-[11px] text-[#14213D]/40 mt-1">Espace partagé avec le même code propriétaire — pratique pour toi et de futurs collaborateurs.</p>
+        {showNotes && (
+          <div className="mt-3">
+            <div className="flex gap-2 mb-3">
+              <input
+                placeholder="Nouvelle note ou tâche…"
+                value={noteDraft}
+                onChange={(e) => setNoteDraft(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") addNote(); }}
+                className="f-body flex-1 px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm"
+              />
+              <button disabled={notesBusy || !noteDraft.trim()} onClick={addNote} className="f-mono text-xs bg-[#14213D] disabled:opacity-30 text-white px-4 py-2 rounded-lg">Ajouter</button>
+            </div>
+            <div className="space-y-1.5 max-h-64 overflow-y-auto">
+              {notes.length === 0 && <p className="f-body text-xs text-[#14213D]/40">Aucune note pour l'instant.</p>}
+              {notes.map((n) => (
+                <div key={n.id} className="flex items-center gap-2 border-b border-dashed border-[#14213D]/10 pb-1.5">
+                  <input type="checkbox" checked={n.done} onChange={(e) => toggleNote(n.id, e.target.checked)} className="w-4 h-4 accent-[#2D6A4F]" />
+                  <span className={`f-body text-sm flex-1 ${n.done ? "line-through text-[#14213D]/30" : "text-[#14213D]"}`}>{n.text}</span>
+                  <button onClick={() => deleteNote(n.id)} className="text-[#C1440E]/50 hover:text-[#C1440E]"><X size={14} /></button>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </div>
@@ -2804,11 +2931,26 @@ function App() {
         CATEGORIES.length = 0;
         CATEGORIES.push(...c.categories);
       }
+      // Reprend aussi le profil du rôle actif (statut d'abonnement notamment) —
+      // sans ça, un accès gratuit accordé par le propriétaire, ou un paiement
+      // confirmé, ne serait visible qu'après déconnexion/reconnexion complète.
+      if (role === "vendor" && vendorInfo.phone) {
+        try {
+          const vp = await apiGet(`/api/profiles/vendor/${encodeURIComponent(vendorInfo.phone)}`);
+          setVendorInfo((cur) => ({ ...cur, ...vp, registered: true }));
+        } catch { /* ignoré, on réessaiera au prochain cycle */ }
+      }
+      if (role === "courier" && courierInfo.phone) {
+        try {
+          const cp = await apiGet(`/api/profiles/courier/${encodeURIComponent(courierInfo.phone)}`);
+          setCourierInfo((cur) => ({ ...cur, ...cp, registered: true }));
+        } catch { /* idem */ }
+      }
     } catch (e) {
       console.error("Erreur de rafraîchissement depuis le serveur:", e);
     }
     setLoading(false);
-  }, []);
+  }, [role, vendorInfo.phone, courierInfo.phone]);
 
   // Au premier chargement, on retrouve le "je suis connecté en tant que..." mémorisé
   // sur cet appareil, puis on va chercher chez le serveur le vrai statut d'abonnement
@@ -2935,7 +3077,7 @@ function App() {
   }
   // Retourne la commande créée (utile pour le paiement CinetPay, qui doit relier un
   // transaction_id à une commande déjà existante AVANT de lancer le guichet).
-  async function placeOrder(total, deliveryFee = 0, orderZone = zone, payInfo = {}, shippingMethod = "livreur", transportCompany = "") {
+  async function placeOrder(total, deliveryFee = 0, orderZone = zone, payInfo = {}, shippingMethod = "livreur", transportCompany = "", address = "") {
     const created = await apiSend("/api/orders", "POST", {
       buyerName: buyerInfo.name,
       buyerPhone: buyerInfo.phone,
@@ -2947,6 +3089,7 @@ function App() {
       cinetpayTransactionId: payInfo.transactionId || null,
       shippingMethod,
       transportCompany,
+      buyerAddress: address,
       clientKey: checkoutKeyRef.current,
     }, getPhoneToken(buyerInfo.phone));
     checkoutKeyRef.current = uid(); // commande réussie : nouvelle clé pour la prochaine
