@@ -421,6 +421,86 @@ function ProductGalleryModal({ product, onClose }) {
   );
 }
 
+// Négociation de la compagnie de transport entre acheteur et vendeur —
+// utilisée des deux côtés (viewerRole indique qui regarde l'écran).
+function TransportNegotiationCard({ order, viewerRole, viewerPhone, onPropose, onConfirm }) {
+  const [showCounter, setShowCounter] = useState(false);
+  const [companyDraft, setCompanyDraft] = useState("");
+  const [feeDraft, setFeeDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const settled = order.transportConfirmedByBuyer && order.transportConfirmedByVendor;
+  const theirTurn = order.transportProposedBy && order.transportProposedBy !== viewerRole; // c'est à viewerRole de répondre
+  const waitingOnOther = order.transportProposedBy === viewerRole && !settled;
+
+  async function handleConfirm() {
+    setBusy(true);
+    setError("");
+    try {
+      await onConfirm(order.id, viewerPhone);
+    } catch (e) {
+      setError(e.message || "Erreur pendant la confirmation.");
+    }
+    setBusy(false);
+  }
+  async function handlePropose() {
+    if (!companyDraft.trim()) return;
+    if (viewerRole === "vendor" && (!feeDraft || Number(feeDraft) < 0)) { setError("Indique des frais d'expédition."); return; }
+    setBusy(true);
+    setError("");
+    try {
+      await onPropose(order.id, viewerPhone, companyDraft.trim(), viewerRole === "vendor" ? Number(feeDraft) : undefined);
+      setShowCounter(false);
+      setCompanyDraft("");
+      setFeeDraft("");
+    } catch (e) {
+      setError(e.message || "Erreur pendant la proposition.");
+    }
+    setBusy(false);
+  }
+
+  if (!order.transportCompany) return null;
+
+  return (
+    <div className="ticket bg-white border-2 border-[#14213D]/10 p-3 mt-2">
+      <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-1">🚌 Compagnie de transport</p>
+      {settled ? (
+        <p className="f-body text-sm text-[#2D6A4F]">✅ {order.transportCompany} confirmée — Frais : {order.transportFee?.toLocaleString("fr-FR")} F</p>
+      ) : (
+        <>
+          <p className="f-body text-sm text-[#14213D]">
+            {order.transportCompany}{order.transportFee !== null ? ` — ${order.transportFee.toLocaleString("fr-FR")} F` : ""}
+            <span className="f-mono text-[10px] text-[#14213D]/40"> · proposé par {order.transportProposedBy === viewerRole ? "toi" : (viewerRole === "buyer" ? "le vendeur" : "l'acheteur")}</span>
+          </p>
+          {waitingOnOther && <p className="f-body text-xs text-[#14213D]/40 mt-1">En attente de la réponse de {viewerRole === "buyer" ? "le vendeur" : "l'acheteur"}…</p>}
+          {theirTurn && !showCounter && (
+            <div className="flex gap-2 mt-2">
+              {order.transportFee !== null && (
+                <button disabled={busy} onClick={handleConfirm} className="flex-1 f-mono text-xs bg-[#2D6A4F] text-white py-1.5 rounded-full">{busy ? "…" : "Confirmer"}</button>
+              )}
+              <button onClick={() => setShowCounter(true)} className="flex-1 f-mono text-xs bg-[#14213D]/10 text-[#14213D] py-1.5 rounded-full">Proposer une autre compagnie</button>
+            </div>
+          )}
+          {theirTurn && showCounter && (
+            <div className="mt-2 space-y-1.5">
+              <input placeholder="Nom de la compagnie" value={companyDraft} onChange={(e) => setCompanyDraft(e.target.value)} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
+              {viewerRole === "vendor" && (
+                <input type="number" placeholder="Frais d'expédition (FCFA)" value={feeDraft} onChange={(e) => setFeeDraft(e.target.value)} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
+              )}
+              <div className="flex gap-2">
+                <button disabled={busy || !companyDraft.trim()} onClick={handlePropose} className="flex-1 f-mono text-xs bg-[#F2A93B] text-[#14213D] py-1.5 rounded-full disabled:opacity-40">{busy ? "…" : "Envoyer la proposition"}</button>
+                <button onClick={() => setShowCounter(false)} className="flex-1 f-mono text-xs bg-[#14213D]/10 text-[#14213D] py-1.5 rounded-full">Annuler</button>
+              </div>
+            </div>
+          )}
+          {error && <p className="f-body text-xs text-[#C1440E] mt-1">{error}</p>}
+        </>
+      )}
+    </div>
+  );
+}
+
 function CourierTrackingCard({ order }) {
   if (!order.courierPhone) return null;
   const hasLocation = order.courierLat != null && order.courierLng != null;
@@ -972,7 +1052,7 @@ function ChangePhoneNumber({ role, info, accentColor, onChanged }) {
   );
 }
 
-function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, registerBuyer, logoutBuyer, placeOrder, cancelOrder, showCart, setShowCart, myOrders, chooseCourierForOrder, confirmDeliveryByBuyer, tip }) {
+function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, registerBuyer, logoutBuyer, placeOrder, cancelOrder, showCart, setShowCart, myOrders, chooseCourierForOrder, confirmDeliveryByBuyer, proposeTransport, confirmTransport, tip }) {
   const [category, setCategory] = useState("");
   const [search, setSearch] = useState("");
   const [visibleCount, setVisibleCount] = useState(20);
@@ -982,6 +1062,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
 
   const [deliveryZone, setDeliveryZone] = useState("");
   const [shippingMethod, setShippingMethod] = useState("livreur"); // "livreur" | "transport"
+  const [preferredTransportCompany, setPreferredTransportCompany] = useState("");
   const [paymentMethod, setPaymentMethod] = useState("cinetpay"); // "cinetpay" | "cod"
   const [payProcessing, setPayProcessing] = useState(false);
   const [payError, setPayError] = useState("");
@@ -1077,7 +1158,8 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
       // La commande est créée tout de suite, non payée — c'est /api/cinetpay/notify
       // (vérifié auprès de CinetPay côté serveur) qui la marquera payée. Si le
       // paiement échoue, on annule automatiquement cette commande.
-      const order = await placeOrder(total, 0, deliveryZone, { paymentMethod: "cinetpay" }, shippingMethod);
+      const order = await placeOrder(total, 0, deliveryZone, { paymentMethod: "cinetpay" }, shippingMethod, preferredTransportCompany);
+      setPreferredTransportCompany("");
       const transactionId = `ZK-${order.id}`;
       await apiSend("/api/payments/pending", "POST", { transactionId, kind: "order", orderId: order.id, amount: total }, getPhoneToken(buyerInfo.phone));
 
@@ -1128,7 +1210,8 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
     setPayError("");
     if (paymentMethod === "cod") {
       setPayProcessing(true);
-      placeOrder(total, 0, deliveryZone, { paymentMethod: "cod" }, shippingMethod)
+      placeOrder(total, 0, deliveryZone, { paymentMethod: "cod" }, shippingMethod, preferredTransportCompany)
+        .then(() => setPreferredTransportCompany(""))
         .catch((e) => setPayError(e.message || "Erreur pendant la commande. Réessaie."))
         .finally(() => setPayProcessing(false));
     } else {
@@ -1252,9 +1335,12 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
               </div>
               <button onClick={() => setReceiptOrder(o)} className="f-mono text-[10px] text-[#14213D]/40 hover:text-[#14213D] underline mt-1">🧾 Voir / imprimer le reçu</button>
               {o.shippingMethod === "transport" && (
-                <p className="f-mono text-[10px] text-[#14213D]/50 mt-1">
-                  🚌 {o.transportCompany ? `${o.transportCompany} · Suivi: ${o.trackingNumber || "en attente"}` : "En attente de prise en charge par le vendeur"}
-                </p>
+                <>
+                  <TransportNegotiationCard order={o} viewerRole="buyer" viewerPhone={buyerInfo.phone} onPropose={proposeTransport} onConfirm={confirmTransport} />
+                  {o.transportConfirmedByBuyer && o.transportConfirmedByVendor && (
+                    <p className="f-mono text-[10px] text-[#14213D]/50 mt-1">Suivi : {o.trackingNumber || "en attente que le vendeur l'envoie au transporteur"}</p>
+                  )}
+                </>
               )}
               {o.shippingMethod === "livreur" && o.courierName && (
                 <div className="mt-1">
@@ -1402,7 +1488,16 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                       </button>
                     </div>
                     {shippingMethod === "transport" && (
-                      <p className="f-body text-[11px] text-[#14213D]/50 mt-1.5">Le vendeur confiera ton colis à une compagnie de transport et t'enverra le nom de la compagnie et le numéro de suivi. Tu récupères le colis à la gare/agence de la ville de destination.</p>
+                      <>
+                        <p className="f-body text-[11px] text-[#14213D]/50 mt-1.5">Le vendeur confiera ton colis à une compagnie de transport et t'enverra le nom de la compagnie et le numéro de suivi. Tu récupères le colis à la gare/agence de la ville de destination.</p>
+                        <input
+                          placeholder="Compagnie de transport souhaitée (ex: UTB, STC...)"
+                          value={preferredTransportCompany}
+                          onChange={(e) => setPreferredTransportCompany(e.target.value)}
+                          className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm mt-2 focus:outline-none focus:border-[#F2A93B]"
+                        />
+                        <p className="f-body text-[10px] text-[#14213D]/35 mt-1">Le vendeur confirmera avec les frais, ou te proposera une autre compagnie si celle-ci ne le dessert pas.</p>
+                      </>
                     )}
                   </div>
                   <ZonePicker value={deliveryZone} onChange={setDeliveryZone} label={shippingMethod === "transport" ? "Ville de destination" : "Zone de livraison (précise)"} />
@@ -1463,7 +1558,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
   );
 }
 
-function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addProduct, updateProduct, deleteProduct, orders, confirmOrder, cancelOrder, shipOrder, updateStatus, setRole, trialDays, accessFee, onPhoneChanged, tip }) {
+function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addProduct, updateProduct, deleteProduct, orders, confirmOrder, cancelOrder, shipOrder, updateStatus, setRole, trialDays, accessFee, onPhoneChanged, proposeTransport, confirmTransport, tip }) {
   const [shipForm, setShipForm] = useState({}); // { [orderId]: { company, tracking } }
   const [form, setForm] = useState({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrls: [], deliveryTime: "", description: "", vendorLandmark: vendorInfo.landmark || "" });
   const [editingId, setEditingId] = useState(null);
@@ -1867,26 +1962,24 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                   )}
                   {o.status === "confirmee" && o.shippingMethod === "transport" && (
                     <div className="mt-3 pt-3 border-t border-dashed border-[#14213D]/10 space-y-2">
-                      <p className="f-body text-[11px] text-[#14213D]/50">Remets le colis à une compagnie de transport vers {o.zone}, puis renseigne les infos pour que {o.buyerName} puisse suivre et récupérer sa commande.</p>
-                      <input
-                        placeholder="Compagnie de transport (ex : UTB, Express Union...)"
-                        value={shipForm[o.id]?.company || ""}
-                        onChange={(e) => setShipForm({ ...shipForm, [o.id]: { ...shipForm[o.id], company: e.target.value } })}
-                        className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-xs focus:outline-none focus:border-[#3B6FA0]"
-                      />
-                      <input
-                        placeholder="Numéro de suivi / bordereau"
-                        value={shipForm[o.id]?.tracking || ""}
-                        onChange={(e) => setShipForm({ ...shipForm, [o.id]: { ...shipForm[o.id], tracking: e.target.value } })}
-                        className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-xs focus:outline-none focus:border-[#3B6FA0]"
-                      />
-                      <button
-                        disabled={!shipForm[o.id]?.company}
-                        onClick={() => shipOrder(o.id, shipForm[o.id].company, shipForm[o.id]?.tracking || "")}
-                        className="w-full f-mono text-xs bg-[#3B6FA0] disabled:opacity-30 text-white py-1.5 rounded-full"
-                      >
-                        Marquer expédiée (transport)
-                      </button>
+                      <TransportNegotiationCard order={o} viewerRole="vendor" viewerPhone={vendorInfo.phone} onPropose={proposeTransport} onConfirm={confirmTransport} />
+                      {o.transportConfirmedByBuyer && o.transportConfirmedByVendor && (
+                        <>
+                          <p className="f-body text-[11px] text-[#14213D]/50">Remets le colis à {o.transportCompany} vers {o.zone}, puis renseigne le numéro de suivi pour que {o.buyerName} puisse récupérer sa commande.</p>
+                          <input
+                            placeholder="Numéro de suivi / bordereau"
+                            value={shipForm[o.id]?.tracking || ""}
+                            onChange={(e) => setShipForm({ ...shipForm, [o.id]: { ...shipForm[o.id], tracking: e.target.value } })}
+                            className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-xs focus:outline-none focus:border-[#3B6FA0]"
+                          />
+                          <button
+                            onClick={() => shipOrder(o.id, o.transportCompany, shipForm[o.id]?.tracking || "")}
+                            className="w-full f-mono text-xs bg-[#3B6FA0] text-white py-1.5 rounded-full"
+                          >
+                            Marquer expédiée (transport)
+                          </button>
+                        </>
+                      )}
                     </div>
                   )}
                   {o.status === "en_transit" && o.shippingMethod === "transport" && (
@@ -2842,7 +2935,7 @@ function App() {
   }
   // Retourne la commande créée (utile pour le paiement CinetPay, qui doit relier un
   // transaction_id à une commande déjà existante AVANT de lancer le guichet).
-  async function placeOrder(total, deliveryFee = 0, orderZone = zone, payInfo = {}, shippingMethod = "livreur") {
+  async function placeOrder(total, deliveryFee = 0, orderZone = zone, payInfo = {}, shippingMethod = "livreur", transportCompany = "") {
     const created = await apiSend("/api/orders", "POST", {
       buyerName: buyerInfo.name,
       buyerPhone: buyerInfo.phone,
@@ -2853,6 +2946,7 @@ function App() {
       paymentMethod: payInfo.paymentMethod || "cod",
       cinetpayTransactionId: payInfo.transactionId || null,
       shippingMethod,
+      transportCompany,
       clientKey: checkoutKeyRef.current,
     }, getPhoneToken(buyerInfo.phone));
     checkoutKeyRef.current = uid(); // commande réussie : nouvelle clé pour la prochaine
@@ -2865,6 +2959,14 @@ function App() {
       setProducts(await apiGet("/api/products"));
     } catch { /* la prochaine boucle de rafraîchissement s'en chargera */ }
     return created;
+  }
+  async function proposeTransport(orderId, phone, company, fee) {
+    const updated = await apiSend(`/api/orders/${orderId}/transport-propose`, "POST", { phone, company, fee }, getPhoneToken(phone));
+    setOrders((prev) => prev.map((o) => (o.id === orderId ? updated : o)));
+  }
+  async function confirmTransport(orderId, phone) {
+    const updated = await apiSend(`/api/orders/${orderId}/transport-confirm`, "POST", { phone }, getPhoneToken(phone));
+    setOrders((prev) => prev.map((o) => (o.id === orderId ? updated : o)));
   }
   async function confirmOrder(id) {
     const updated = await apiSend(`/api/orders/${id}`, "PATCH", { status: "confirmee" }, getPhoneToken(vendorInfo.phone));
@@ -2929,6 +3031,7 @@ function App() {
               buyerInfo={buyerInfo} registerBuyer={registerBuyer} logoutBuyer={logoutBuyer}
               placeOrder={placeOrder} cancelOrder={cancelOrder} showCart={showCart} setShowCart={setShowCart}
               myOrders={myOrders} chooseCourierForOrder={chooseCourierForOrder} confirmDeliveryByBuyer={confirmDeliveryByBuyer}
+              proposeTransport={proposeTransport} confirmTransport={confirmTransport}
               tip={siteContent.tipBuyer}
             />
           )}
@@ -2938,6 +3041,7 @@ function App() {
               products={products} addProduct={addProduct} updateProduct={updateProduct} deleteProduct={deleteProduct}
               orders={orders} confirmOrder={confirmOrder} cancelOrder={cancelOrder} shipOrder={shipOrder} updateStatus={updateStatus} setRole={setRole}
               trialDays={trialDays} accessFee={accessFee} onPhoneChanged={(profile) => applyChangedPhone("vendor", profile)}
+              proposeTransport={proposeTransport} confirmTransport={confirmTransport}
               tip={siteContent.tipVendor}
             />
           )}
