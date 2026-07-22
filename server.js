@@ -180,6 +180,8 @@ function mapOrder(r) {
     transportProposedBy: r.transport_proposed_by || null,
     transportConfirmedByBuyer: r.transport_confirmed_by_buyer || false,
     transportConfirmedByVendor: r.transport_confirmed_by_vendor || false,
+    buyerAddress: r.buyer_address || "",
+    orderSeq: r.order_seq || null,
   };
 }
 function mapProfile(r) {
@@ -446,11 +448,11 @@ app.post("/api/orders", requirePhone((req) => req.body.buyerPhone), async (req, 
       `INSERT INTO orders (id, buyer_name, buyer_phone, zone, items, total, delivery_fee, fee_rate, commission, status,
          courier_name, courier_phone, created_at, payment_method, paid, cinetpay_transaction_id, shipping_method,
          transport_company, tracking_number, courier_bids, courier_confirmed, buyer_confirmed,
-         transport_proposed_by, transport_confirmed_by_buyer)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'nouvelle',NULL,NULL,$10,$11,false,$12,$13,$14,NULL,'[]',false,false,$15,$16)`,
+         transport_proposed_by, transport_confirmed_by_buyer, buyer_address)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'nouvelle',NULL,NULL,$10,$11,false,$12,$13,$14,NULL,'[]',false,false,$15,$16,$17)`,
       [id, o.buyerName, o.buyerPhone, o.zone, JSON.stringify(o.items || []), o.total, o.deliveryFee || 0, feeRate, commission,
         createdAt, o.paymentMethod || "cod", o.cinetpayTransactionId || null, o.shippingMethod || "livreur",
-        initialTransportCompany, initialTransportCompany ? "buyer" : null, !!initialTransportCompany]
+        initialTransportCompany, initialTransportCompany ? "buyer" : null, !!initialTransportCompany, o.buyerAddress || ""]
     );
     if (o.clientKey) {
       await client.query(
@@ -945,10 +947,11 @@ app.post("/api/access/:role/:phone/grant", requireOwner, async (req, res) => {
   const days = Number(req.body.days) || 30;
   if (!["vendor", "courier"].includes(role)) return res.status(400).json({ error: "Rôle invalide." });
   const expiresAt = Date.now() + days * 24 * 3600 * 1000;
-  await pool.query(
+  const result = await pool.query(
     "UPDATE profiles SET subscription_status = 'active', subscription_expires_at = $1 WHERE role = $2 AND phone = $3",
     [expiresAt, role, phone]
   );
+  if (result.rowCount === 0) return res.status(404).json({ error: "Ce profil est introuvable — le numéro a peut-être changé." });
   logAdminAction("Accès gratuit accordé", `${role} · ${phone}`, `${days} jours`);
   res.json({ ok: true });
 });
@@ -961,6 +964,34 @@ app.post("/api/access/:role/:phone/grant", requireOwner, async (req, res) => {
 app.get("/api/admin-actions", requireOwner, async (req, res) => {
   const { rows } = await pool.query("SELECT * FROM admin_actions ORDER BY created_at DESC LIMIT 100");
   res.json(rows.map((r) => ({ id: r.id, action: r.action, target: r.target, details: r.details, createdAt: Number(r.created_at) })));
+});
+
+// Notes/tâches partagées — même code propriétaire, en vue de futurs collaborateurs.
+app.get("/api/owner-notes", requireOwner, async (req, res) => {
+  const { rows } = await pool.query("SELECT * FROM owner_notes ORDER BY done ASC, created_at DESC");
+  res.json(rows.map((r) => ({ id: r.id, text: r.text, done: r.done, createdAt: Number(r.created_at) })));
+});
+app.post("/api/owner-notes", requireOwner, async (req, res) => {
+  const text = (req.body.text || "").trim();
+  if (!text) return res.status(400).json({ error: "La note ne peut pas être vide." });
+  const id = uid();
+  await pool.query("INSERT INTO owner_notes (id, text, done, created_at) VALUES ($1,$2,false,$3)", [id, text, Date.now()]);
+  res.json({ id, text, done: false, createdAt: Date.now() });
+});
+app.patch("/api/owner-notes/:id", requireOwner, async (req, res) => {
+  const sets = [];
+  const vals = [];
+  let i = 1;
+  if (req.body.done !== undefined) { sets.push(`done = $${i++}`); vals.push(!!req.body.done); }
+  if (req.body.text !== undefined) { sets.push(`text = $${i++}`); vals.push(req.body.text); }
+  if (sets.length === 0) return res.status(400).json({ error: "Rien à mettre à jour." });
+  vals.push(req.params.id);
+  await pool.query(`UPDATE owner_notes SET ${sets.join(", ")} WHERE id = $${i}`, vals);
+  res.json({ ok: true });
+});
+app.delete("/api/owner-notes/:id", requireOwner, async (req, res) => {
+  await pool.query("DELETE FROM owner_notes WHERE id = $1", [req.params.id]);
+  res.json({ ok: true });
 });
 
 app.get("/api/refunds", requireOwner, async (req, res) => {
