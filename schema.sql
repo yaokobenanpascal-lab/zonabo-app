@@ -208,3 +208,11 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS courier_vehicle_plate TEXT;
 -- couverture (affichée sur la carte produit), image_urls contient toutes les
 -- photos dans l'ordre, y compris la première.
 ALTER TABLE products ADD COLUMN IF NOT EXISTS image_urls JSONB DEFAULT '[]';
+
+-- Négociation acheteur ↔ vendeur sur la compagnie de transport (expédition
+-- intercité) et ses frais : chacun peut proposer une compagnie, l'autre
+-- confirme ou contre-propose, jusqu'à accord des deux côtés.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS transport_fee NUMERIC;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS transport_proposed_by TEXT; -- 'buyer' ou 'vendor'
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS transport_confirmed_by_buyer BOOLEAN DEFAULT false;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS transport_confirmed_by_vendor BOOLEAN DEFAULT false;
