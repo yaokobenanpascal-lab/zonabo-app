@@ -579,10 +579,15 @@ app.post("/api/orders/:id/confirm-courier", async (req, res) => {
 });
 app.post("/api/orders/:id/confirm-buyer", async (req, res) => {
   const tokenPhone = getTokenPhone(req);
-  const { rows } = await pool.query("SELECT courier_confirmed, buyer_phone FROM orders WHERE id = $1", [req.params.id]);
+  const { rows } = await pool.query("SELECT courier_confirmed, buyer_phone, shipping_method, status FROM orders WHERE id = $1", [req.params.id]);
   if (!rows[0]) return res.status(404).json({ error: "Commande introuvable." });
   if (!tokenPhone || tokenPhone !== rows[0].buyer_phone) return res.status(403).json({ error: "Ce n'est pas ta commande." });
-  const status = rows[0].courier_confirmed ? "livree" : undefined;
+  // Livraison par compagnie de transport : dès que l'acheteur confirme avoir
+  // récupéré son colis à l'agence, la commande passe directement "livrée" —
+  // il n'y a pas de livreur à faire confirmer en plus, contrairement au cas
+  // "livreur" ci-dessous (double confirmation acheteur + livreur).
+  const isTransportPickup = rows[0].shipping_method === "transport" && rows[0].status === "en_transit";
+  const status = (isTransportPickup || rows[0].courier_confirmed) ? "livree" : undefined;
   await pool.query(
     `UPDATE orders SET buyer_confirmed = true, buyer_confirmed_at = $1 ${status ? ", status = 'livree'" : ""} WHERE id = $2`,
 
