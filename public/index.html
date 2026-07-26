@@ -931,9 +931,10 @@ function getPhoneToken(phone) {
 // vérifié, le jeton reçu sert à prouver "j'agis bien en tant que ce numéro" pour
 // toutes les actions sensibles (publier un produit, commander, confirmer une
 // livraison...).
-function RegisterWithPhoneVerification({ title, subtitle, accentColor, onSubmit }) {
+function RegisterWithPhoneVerification({ title, subtitle, accentColor, onSubmit, role }) {
+  const [authMode, setAuthMode] = useState("login"); // "login" (mot de passe) | "register" (code + création)
   const [mode, setMode] = useState("phone"); // "phone" | "email"
-  const [form, setForm] = useState({ name: "", phone: "" });
+  const [form, setForm] = useState({ name: "", phone: "", password: "" });
   const [step, setStep] = useState("info"); // "info" | "code"
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
@@ -966,6 +967,40 @@ function RegisterWithPhoneVerification({ title, subtitle, accentColor, onSubmit 
     setBusy(false);
   }
 
+  async function loginWithPassword() {
+    setError("");
+    setBusy(true);
+    try {
+      const { token, profile } = await apiSend("/api/auth/login-password", "POST", { role, phone: form.phone, password: form.password });
+      savePhoneToken(form.phone, token);
+      onSubmit({ ...form, name: profile?.name || form.name }, token);
+    } catch (e) {
+      setError(e.message || "Identifiant ou mot de passe incorrect.");
+    }
+    setBusy(false);
+  }
+
+  if (authMode === "login") {
+    return (
+      <div className="max-w-sm mx-auto px-4 py-8">
+        <h2 className="f-display font-semibold text-xl text-[#14213D] mb-1">{title}</h2>
+        <p className="f-body text-sm text-[#14213D]/50 mb-5">Connecte-toi avec ton mot de passe.</p>
+        <div className="space-y-3" onKeyDown={(e) => { if (e.key === "Enter" && form.phone && form.password) loginWithPassword(); }}>
+          <input placeholder="Ton numéro ou ton email" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} onFocus={keepInView} className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-sm focus:outline-none" />
+          <input type="password" placeholder="Mot de passe" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} onFocus={keepInView} className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-sm focus:outline-none" />
+          {error && <p className="f-body text-xs text-[#C1440E]">{error}</p>}
+          <button disabled={!form.phone || !form.password || busy} onClick={loginWithPassword} className="w-full disabled:opacity-30 text-[#14213D] f-display font-semibold py-3 rounded-full text-sm" style={{ backgroundColor: accentColor }}>
+            {busy ? "Connexion…" : "Se connecter"}
+          </button>
+          <div className="flex justify-between">
+            <button onClick={() => { setAuthMode("register"); setError(""); }} className="f-mono text-xs text-[#14213D]/40 underline">Pas encore de compte ? S'inscrire</button>
+            <button onClick={() => { setAuthMode("register"); setError(""); }} className="f-mono text-xs text-[#14213D]/40 underline">Mot de passe oublié ?</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-sm mx-auto px-4 py-8">
       <h2 className="f-display font-semibold text-xl text-[#14213D] mb-1">{title}</h2>
@@ -985,6 +1020,14 @@ function RegisterWithPhoneVerification({ title, subtitle, accentColor, onSubmit 
             onFocus={keepInView}
             className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-sm focus:outline-none"
           />
+          <input
+            type="password"
+            placeholder="Crée un mot de passe (pour te reconnecter facilement)"
+            value={form.password}
+            onChange={(e) => setForm({ ...form, password: e.target.value })}
+            onFocus={keepInView}
+            className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-sm focus:outline-none"
+          />
           {error && <p className="f-body text-xs text-[#C1440E]">{error}</p>}
           <button
             disabled={!form.name || !form.phone || busy}
@@ -994,6 +1037,7 @@ function RegisterWithPhoneVerification({ title, subtitle, accentColor, onSubmit 
           >
             {busy ? "Envoi…" : mode === "email" ? "Recevoir mon code par email" : "Recevoir mon code par SMS"}
           </button>
+          <button onClick={() => { setAuthMode("login"); setError(""); }} className="w-full f-mono text-xs text-[#14213D]/40 underline">J'ai déjà un compte avec mot de passe</button>
         </div>
       ) : (
         <div className="space-y-3" onKeyDown={(e) => { if (e.key === "Enter" && code) verify(); }}>
@@ -1162,6 +1206,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
         title="Espace acheteur"
         subtitle="Entre tes infos pour commander et suivre tes livraisons."
         accentColor="#F2A93B"
+        role="buyer"
         onSubmit={(form) => registerBuyer(form)}
       />
     );
@@ -1652,6 +1697,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
         title="Espace vendeur"
         subtitle="Entre tes infos pour publier des produits."
         accentColor="#2D6A4F"
+        role="vendor"
         onSubmit={(form) => registerVendor(form)}
       />
     );
@@ -2139,6 +2185,7 @@ function CourierView({ courierInfo, registerCourier, logoutCourier, orders, subm
         title="Espace livreur"
         subtitle="Entre tes infos pour voir les livraisons disponibles."
         accentColor="#C1440E"
+        role="courier"
         onSubmit={(form) => registerCourier(form)}
       />
     );
@@ -2990,17 +3037,23 @@ function App() {
     })();
   }, []);
 
-  function registerBuyer(info) {
+  async function registerBuyer(info) {
     const next = { ...info, registered: true };
     setBuyerInfo(next);
     saveProfile("buyer", next);
+    try {
+      const profile = await apiSend(`/api/profiles/buyer/${encodeURIComponent(info.phone)}`, "PUT", { name: info.name, password: info.password }, getPhoneToken(info.phone));
+      setBuyerInfo((cur) => ({ ...cur, ...profile, registered: true }));
+    } catch (e) {
+      console.error("Erreur d'inscription acheteur:", e);
+    }
   }
   async function registerVendor(info) {
     const merged = { ...vendorInfo, ...info, registered: true };
     setVendorInfo(merged);
     saveProfile("vendor", merged);
     try {
-      const profile = await apiSend(`/api/profiles/vendor/${encodeURIComponent(info.phone)}`, "PUT", { name: info.name }, getPhoneToken(info.phone));
+      const profile = await apiSend(`/api/profiles/vendor/${encodeURIComponent(info.phone)}`, "PUT", { name: info.name, password: info.password }, getPhoneToken(info.phone));
       setVendorInfo((cur) => ({ ...cur, ...profile, registered: true }));
     } catch (e) {
       console.error("Erreur d'inscription vendeur:", e);
@@ -3011,7 +3064,7 @@ function App() {
     setCourierInfo(merged);
     saveProfile("courier", merged);
     try {
-      const profile = await apiSend(`/api/profiles/courier/${encodeURIComponent(info.phone)}`, "PUT", { name: info.name }, getPhoneToken(info.phone));
+      const profile = await apiSend(`/api/profiles/courier/${encodeURIComponent(info.phone)}`, "PUT", { name: info.name, password: info.password }, getPhoneToken(info.phone));
       setCourierInfo((cur) => ({ ...cur, ...profile, registered: true }));
     } catch (e) {
       console.error("Erreur d'inscription livreur:", e);
