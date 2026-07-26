@@ -245,3 +245,9 @@ CREATE TABLE IF NOT EXISTS owner_notes (
   created_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_owner_notes_date ON owner_notes(created_at DESC);
+
+-- Mot de passe facultatif pour acheteur/vendeur/livreur — permet de se
+-- reconnecter directement sans redemander un code SMS/email à chaque fois.
+-- Le code SMS/email reste utilisé pour la première inscription et pour
+-- réinitialiser le mot de passe en cas d'oubli.
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS password_hash TEXT;
