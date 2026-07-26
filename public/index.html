@@ -447,7 +447,7 @@ function TransportNegotiationCard({ order, viewerRole, viewerPhone, onPropose, o
     setBusy(true);
     setError("");
     try {
-      await onConfirm(order.id, viewerPhone);
+      await onConfirm(order.id, viewerPhone, viewerRole);
     } catch (e) {
       setError(e.message || "Erreur pendant la confirmation.");
     }
@@ -459,7 +459,7 @@ function TransportNegotiationCard({ order, viewerRole, viewerPhone, onPropose, o
     setBusy(true);
     setError("");
     try {
-      await onPropose(order.id, viewerPhone, companyDraft.trim(), viewerRole === "vendor" ? Number(feeDraft) : undefined);
+      await onPropose(order.id, viewerPhone, companyDraft.trim(), viewerRole === "vendor" ? Number(feeDraft) : undefined, viewerRole);
       setEditing(false);
     } catch (e) {
       setError(e.message || "Erreur pendant la proposition.");
@@ -3115,12 +3115,12 @@ function App() {
     } catch { /* la prochaine boucle de rafraîchissement s'en chargera */ }
     return created;
   }
-  async function proposeTransport(orderId, phone, company, fee) {
-    const updated = await apiSend(`/api/orders/${orderId}/transport-propose`, "POST", { phone, company, fee }, getPhoneToken(phone));
+  async function proposeTransport(orderId, phone, company, fee, role) {
+    const updated = await apiSend(`/api/orders/${orderId}/transport-propose`, "POST", { phone, company, fee, role }, getPhoneToken(phone));
     setOrders((prev) => prev.map((o) => (o.id === orderId ? updated : o)));
   }
-  async function confirmTransport(orderId, phone) {
-    const updated = await apiSend(`/api/orders/${orderId}/transport-confirm`, "POST", { phone }, getPhoneToken(phone));
+  async function confirmTransport(orderId, phone, role) {
+    const updated = await apiSend(`/api/orders/${orderId}/transport-confirm`, "POST", { phone, role }, getPhoneToken(phone));
     setOrders((prev) => prev.map((o) => (o.id === orderId ? updated : o)));
   }
   async function confirmOrder(id) {
