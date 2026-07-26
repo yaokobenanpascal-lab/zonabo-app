@@ -86,6 +86,25 @@ function uid() {
   return Date.now().toString(36) + crypto.randomBytes(4).toString("hex");
 }
 
+// Mot de passe (facultatif) pour acheteur/vendeur/livreur — haché avec le
+// module crypto natif de Node (scrypt + sel aléatoire), pas besoin d'une
+// dépendance supplémentaire comme bcrypt.
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = crypto.scryptSync(password, salt, 64).toString("hex");
+  return `${salt}:${hash}`;
+}
+function verifyPassword(password, stored) {
+  if (!stored || !password) return false;
+  const [salt, hash] = stored.split(":");
+  if (!salt || !hash) return false;
+  const check = crypto.scryptSync(password, salt, 64).toString("hex");
+  // Comparaison à temps constant pour éviter les attaques par mesure de délai.
+  const a = Buffer.from(hash, "hex");
+  const b = Buffer.from(check, "hex");
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 // --- Auth propriétaire (jeton stocké en base — survit aux redémarrages du serveur) ---
 async function issueOwnerToken() {
   const token = crypto.randomBytes(24).toString("hex");
@@ -682,18 +701,37 @@ app.get("/api/profiles/:role/:phone", async (req, res) => {
 // Crée le profil s'il n'existe pas (essai gratuit démarré maintenant), ou met juste à jour le nom sinon
 app.put("/api/profiles/:role/:phone", requirePhone((req) => req.params.phone), async (req, res) => {
   const { role, phone } = req.params;
-  const { name } = req.body;
+  const { name, password } = req.body;
+  const passwordHash = password ? hashPassword(password) : null;
   const { rows } = await pool.query("SELECT * FROM profiles WHERE role = $1 AND phone = $2", [role, phone]);
   if (rows[0]) {
-    await pool.query("UPDATE profiles SET name = $1 WHERE role = $2 AND phone = $3", [name, role, phone]);
+    if (passwordHash) {
+      await pool.query("UPDATE profiles SET name = $1, password_hash = $2 WHERE role = $3 AND phone = $4", [name, passwordHash, role, phone]);
+    } else {
+      await pool.query("UPDATE profiles SET name = $1 WHERE role = $2 AND phone = $3", [name, role, phone]);
+    }
   } else {
     await pool.query(
-      "INSERT INTO profiles (role, phone, name, trial_started_at, subscription_status) VALUES ($1,$2,$3,$4,'trial')",
-      [role, phone, name, Date.now()]
+      "INSERT INTO profiles (role, phone, name, trial_started_at, subscription_status, password_hash) VALUES ($1,$2,$3,$4,'trial',$5)",
+      [role, phone, name, Date.now(), passwordHash]
     );
   }
   const { rows: r2 } = await pool.query("SELECT * FROM profiles WHERE role = $1 AND phone = $2", [role, phone]);
   res.json(mapProfile(r2[0]));
+});
+
+// Connexion directe par mot de passe — évite de redemander un code SMS/email
+// à chaque connexion, une fois qu'un mot de passe a été créé à l'inscription.
+app.post("/api/auth/login-password", async (req, res) => {
+  const { role, phone, password } = req.body;
+  if (!["buyer", "vendor", "courier"].includes(role)) return res.status(400).json({ error: "Rôle invalide." });
+  if (!phone || !password) return res.status(400).json({ error: "Identifiant et mot de passe requis." });
+  const { rows } = await pool.query("SELECT * FROM profiles WHERE role = $1 AND phone = $2", [role, phone]);
+  if (!rows[0] || !verifyPassword(password, rows[0].password_hash)) {
+    return res.status(401).json({ error: "Identifiant ou mot de passe incorrect." });
+  }
+  const token = await issuePhoneToken(phone);
+  res.json({ token, profile: mapProfile(rows[0]) });
 });
 
 // Point de repère par défaut du vendeur (quartier, repère) — réutilisé pour
