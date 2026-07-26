@@ -121,25 +121,33 @@ async function logAdminAction(action, target, details) {
 }
 
 // --- Auth par téléphone (OTP SMS) : un jeton prouve "j'ai reçu le code envoyé à ce numéro" ---
-const phoneTokens = new Map(); // token -> { phone, expiresAt }
-function issuePhoneToken(phone) {
+// Stocké en base de données (pas en mémoire) : sans ça, tout le monde serait
+// déconnecté à chaque redémarrage du serveur (chaque déploiement, veille du
+// plan gratuit...), avec un message confus "numéro non vérifié".
+async function issuePhoneToken(phone) {
   const token = crypto.randomBytes(24).toString("hex");
-  phoneTokens.set(token, { phone, expiresAt: Date.now() + 30 * 24 * 3600 * 1000 }); // 30 jours
+  await pool.query("INSERT INTO phone_tokens (token, phone, expires_at) VALUES ($1,$2,$3)", [token, phone, Date.now() + 30 * 24 * 3600 * 1000]); // 30 jours
   return token;
 }
-function getTokenPhone(req) {
+async function getTokenPhone(req) {
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
-  const entry = token && phoneTokens.get(token);
-  if (!entry || entry.expiresAt < Date.now()) return null;
-  return entry.phone;
+  if (!token) return null;
+  try {
+    const { rows } = await pool.query("SELECT phone, expires_at FROM phone_tokens WHERE token = $1", [token]);
+    if (!rows[0] || Number(rows[0].expires_at) < Date.now()) return null;
+    return rows[0].phone;
+  } catch (e) {
+    console.error("Erreur de vérification du jeton téléphone:", e);
+    return null;
+  }
 }
 // À utiliser sur toute route où quelqu'un agit "en tant que" tel numéro de téléphone
 // (créer une commande, proposer un prix, confirmer une réception...). Compare le
 // téléphone du jeton envoyé à celui que la requête prétend utiliser.
 function requirePhone(expectedPhoneOf) {
-  return (req, res, next) => {
-    const tokenPhone = getTokenPhone(req);
+  return async (req, res, next) => {
+    const tokenPhone = await getTokenPhone(req);
     if (!tokenPhone) return res.status(401).json({ error: "Numéro non vérifié. Vérifie ton téléphone par SMS d'abord." });
     const expected = expectedPhoneOf(req);
     if (expected && tokenPhone !== expected) {
@@ -332,7 +340,7 @@ app.post("/api/auth/verify-code", async (req, res) => {
       "INSERT INTO verified_phones (phone, verified_at) VALUES ($1,$2) ON CONFLICT (phone) DO UPDATE SET verified_at = $2",
       [phone, Date.now()]
     );
-    res.json({ token: issuePhoneToken(phone) });
+    res.json({ token: await issuePhoneToken(phone) });
   } catch (e) {
     console.error("Erreur de vérification du code:", e);
     res.status(500).json({ error: "Erreur serveur pendant la vérification." });
@@ -374,7 +382,7 @@ app.post("/api/products", requirePhone((req) => req.body.vendorPhone), async (re
 });
 
 app.patch("/api/products/:id", async (req, res) => {
-  const tokenPhone = getTokenPhone(req);
+  const tokenPhone = await getTokenPhone(req);
   const { rows: existing } = await pool.query("SELECT vendor_phone FROM products WHERE id = $1", [req.params.id]);
   if (!existing[0]) return res.status(404).json({ error: "Produit introuvable." });
   if (!tokenPhone || tokenPhone !== existing[0].vendor_phone) return res.status(403).json({ error: "Tu ne peux modifier que tes propres produits." });
@@ -402,7 +410,7 @@ app.patch("/api/products/:id", async (req, res) => {
 });
 
 app.delete("/api/products/:id", async (req, res) => {
-  const tokenPhone = getTokenPhone(req);
+  const tokenPhone = await getTokenPhone(req);
   const { rows: existing } = await pool.query("SELECT vendor_phone FROM products WHERE id = $1", [req.params.id]);
   if (!existing[0]) return res.json({ ok: true }); // déjà supprimé, rien à faire
   if (!tokenPhone || tokenPhone !== existing[0].vendor_phone) return res.status(403).json({ error: "Tu ne peux supprimer que tes propres produits." });
@@ -480,7 +488,7 @@ app.post("/api/orders", requirePhone((req) => req.body.buyerPhone), async (req, 
 // — réservé au(x) vendeur(s) des articles de la commande, ou à l'acheteur pour
 // annuler sa propre commande (ex : paiement CinetPay refusé/annulé).
 app.patch("/api/orders/:id", async (req, res) => {
-  const tokenPhone = getTokenPhone(req);
+  const tokenPhone = await getTokenPhone(req);
   const { rows: existing } = await pool.query("SELECT items, buyer_phone, paid, status AS old_status FROM orders WHERE id = $1", [req.params.id]);
   if (!existing[0]) return res.status(404).json({ error: "Commande introuvable." });
   const vendorPhones = (existing[0].items || []).map((it) => it.vendorPhone).filter(Boolean);
@@ -547,7 +555,7 @@ app.post("/api/orders/:id/bids", requirePhone((req) => req.body.courierPhone), a
 
 // L'acheteur choisit un livreur parmi les propositions reçues — seulement sur ses propres commandes.
 app.post("/api/orders/:id/choose-courier", async (req, res) => {
-  const tokenPhone = getTokenPhone(req);
+  const tokenPhone = await getTokenPhone(req);
   const { rows: existing } = await pool.query("SELECT buyer_phone FROM orders WHERE id = $1", [req.params.id]);
   if (!existing[0]) return res.status(404).json({ error: "Commande introuvable." });
   if (!tokenPhone || tokenPhone !== existing[0].buyer_phone) return res.status(403).json({ error: "Ce n'est pas ta commande." });
@@ -565,7 +573,7 @@ app.post("/api/orders/:id/choose-courier", async (req, res) => {
 
 // Double confirmation de réception — chacun ne peut confirmer que son propre rôle sur SA commande.
 app.post("/api/orders/:id/confirm-courier", async (req, res) => {
-  const tokenPhone = getTokenPhone(req);
+  const tokenPhone = await getTokenPhone(req);
   const { rows } = await pool.query("SELECT buyer_confirmed, courier_phone FROM orders WHERE id = $1", [req.params.id]);
   if (!rows[0]) return res.status(404).json({ error: "Commande introuvable." });
   if (!tokenPhone || tokenPhone !== rows[0].courier_phone) return res.status(403).json({ error: "Tu n'es pas le livreur de cette commande." });
@@ -578,7 +586,7 @@ app.post("/api/orders/:id/confirm-courier", async (req, res) => {
   res.json(mapOrder(r2[0]));
 });
 app.post("/api/orders/:id/confirm-buyer", async (req, res) => {
-  const tokenPhone = getTokenPhone(req);
+  const tokenPhone = await getTokenPhone(req);
   const { rows } = await pool.query("SELECT courier_confirmed, buyer_phone, shipping_method, status FROM orders WHERE id = $1", [req.params.id]);
   if (!rows[0]) return res.status(404).json({ error: "Commande introuvable." });
   if (!tokenPhone || tokenPhone !== rows[0].buyer_phone) return res.status(403).json({ error: "Ce n'est pas ta commande." });
@@ -727,12 +735,13 @@ app.put("/api/orders/:id/location", requirePhone((req) => req.body.courierPhone)
 app.post("/api/profiles/:role/change-phone", async (req, res) => {
   const { role } = req.params;
   const { newPhone, newToken, name } = req.body;
-  const oldPhone = getTokenPhone(req);
+  const oldPhone = await getTokenPhone(req);
   if (!oldPhone) return res.status(401).json({ error: "Numéro actuel non vérifié. Reconnecte-toi." });
   if (!newPhone || !newToken) return res.status(400).json({ error: "Nouveau numéro et code de vérification requis." });
   if (oldPhone === newPhone) return res.status(400).json({ error: "C'est déjà ton numéro actuel." });
-  const entry = phoneTokens.get(newToken);
-  if (!entry || entry.expiresAt < Date.now() || entry.phone !== newPhone) {
+  const { rows: tokenRows } = await pool.query("SELECT phone, expires_at FROM phone_tokens WHERE token = $1", [newToken]);
+  const entry = tokenRows[0];
+  if (!entry || Number(entry.expires_at) < Date.now() || entry.phone !== newPhone) {
     return res.status(403).json({ error: "Le nouveau numéro n'a pas été vérifié correctement." });
   }
 
@@ -800,7 +809,7 @@ app.post("/api/profiles/:role/change-phone", async (req, res) => {
 // conforme, jamais reçu, arnaque suspectée...). Le vendeur concerné est déduit
 // des articles de la commande.
 app.post("/api/reports", async (req, res) => {
-  const tokenPhone = getTokenPhone(req);
+  const tokenPhone = await getTokenPhone(req);
   const { orderId, reason, details } = req.body;
   if (!tokenPhone) return res.status(401).json({ error: "Numéro non vérifié." });
   if (!orderId || !reason) return res.status(400).json({ error: "Commande et motif requis." });
@@ -896,7 +905,7 @@ app.post("/api/vendors/:phone/unsuspend", requireOwner, async (req, res) => {
 // L'acheteur note le vendeur et/ou le livreur, uniquement sur une commande
 // qu'il a lui-même passée et une fois qu'elle est livrée.
 app.post("/api/ratings", async (req, res) => {
-  const tokenPhone = getTokenPhone(req);
+  const tokenPhone = await getTokenPhone(req);
   const { orderId, rateePhone, rateeRole, stars, comment } = req.body;
   if (!tokenPhone) return res.status(401).json({ error: "Numéro non vérifié." });
   if (!orderId || !rateePhone || !rateeRole || !stars) return res.status(400).json({ error: "Informations manquantes." });
