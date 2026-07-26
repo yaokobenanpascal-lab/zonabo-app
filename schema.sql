@@ -171,6 +171,16 @@ CREATE TABLE IF NOT EXISTS owner_tokens (
   expires_at BIGINT NOT NULL
 );
 
+-- Jetons de connexion acheteur/vendeur/livreur (après vérification SMS/email),
+-- stockés en base plutôt qu'en mémoire — même raison que owner_tokens ci-dessus :
+-- sans ça, tout le monde est déconnecté à chaque redémarrage du serveur.
+CREATE TABLE IF NOT EXISTS phone_tokens (
+  token TEXT PRIMARY KEY,
+  phone TEXT NOT NULL,
+  expires_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_phone_tokens_phone ON phone_tokens(phone);
+
 -- Empêche la création de deux commandes identiques en cas de double-clic /
 -- mauvaise connexion : le client envoie une clé unique par tentative d'achat,
 -- et le serveur ignore les doublons envoyés dans les 30 secondes.
