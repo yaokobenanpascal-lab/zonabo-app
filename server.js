@@ -615,10 +615,16 @@ app.post("/api/orders/:id/transport-propose", requirePhone((req) => req.body.pho
   if (!rows[0]) return res.status(404).json({ error: "Commande introuvable." });
   const order = rows[0];
   const phone = req.body.phone;
+  // On se fie au rôle indiqué par le client (il sait déjà dans quel espace il
+  // est) et on vérifie juste qu'il a bien le droit d'agir ainsi sur cette
+  // commande — plutôt que de deviner le rôle depuis le numéro seul, ce qui
+  // était ambigu si la même personne est acheteur ET vendeur avec le même compte.
+  const claimedRole = req.body.role === "vendor" ? "vendor" : "buyer";
   const isBuyer = phone === order.buyer_phone;
   const isVendor = (order.items || []).some((it) => it.vendorPhone === phone);
-  if (!isBuyer && !isVendor) return res.status(403).json({ error: "Non autorisé sur cette commande." });
-  const role = isBuyer ? "buyer" : "vendor";
+  if (claimedRole === "buyer" && !isBuyer) return res.status(403).json({ error: "Non autorisé sur cette commande (acheteur)." });
+  if (claimedRole === "vendor" && !isVendor) return res.status(403).json({ error: "Non autorisé sur cette commande (vendeur)." });
+  const role = claimedRole;
   const company = (req.body.company || "").trim();
   if (!company) return res.status(400).json({ error: "Indique une compagnie de transport." });
   let fee = order.transport_fee;
@@ -643,10 +649,12 @@ app.post("/api/orders/:id/transport-confirm", requirePhone((req) => req.body.pho
   if (!rows[0]) return res.status(404).json({ error: "Commande introuvable." });
   const order = rows[0];
   const phone = req.body.phone;
+  const claimedRole = req.body.role === "vendor" ? "vendor" : "buyer";
   const isBuyer = phone === order.buyer_phone;
   const isVendor = (order.items || []).some((it) => it.vendorPhone === phone);
-  if (!isBuyer && !isVendor) return res.status(403).json({ error: "Non autorisé sur cette commande." });
-  const role = isBuyer ? "buyer" : "vendor";
+  if (claimedRole === "buyer" && !isBuyer) return res.status(403).json({ error: "Non autorisé sur cette commande (acheteur)." });
+  if (claimedRole === "vendor" && !isVendor) return res.status(403).json({ error: "Non autorisé sur cette commande (vendeur)." });
+  const role = claimedRole;
   if (!order.transport_company) return res.status(400).json({ error: "Aucune proposition à confirmer pour l'instant." });
   if (order.transport_proposed_by === role) return res.status(400).json({ error: "Tu ne peux pas confirmer ta propre proposition — attends la réponse de l'autre partie." });
   if (role === "buyer" && (order.transport_fee === null || order.transport_fee === undefined)) {
