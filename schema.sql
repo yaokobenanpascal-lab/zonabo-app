@@ -251,3 +251,10 @@ CREATE INDEX IF NOT EXISTS idx_owner_notes_date ON owner_notes(created_at DESC);
 -- Le code SMS/email reste utilisé pour la première inscription et pour
 -- réinitialiser le mot de passe en cas d'oubli.
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS password_hash TEXT;
+
+-- Portefeuille prépayé du vendeur : la commission de la commande est déduite
+-- automatiquement de ce solde dès que la commande est livrée (jamais avant,
+-- pour ne pas demander au vendeur de payer sur une vente pas encore aboutie).
+-- Le propriétaire crédite ce solde manuellement pour l'instant (en attendant
+-- un vrai rechargement en ligne via CinetPay).
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS wallet_balance NUMERIC NOT NULL DEFAULT 0;
