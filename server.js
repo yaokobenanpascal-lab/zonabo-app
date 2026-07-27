@@ -225,6 +225,7 @@ function mapProfile(r) {
     available: r.available !== false,
     vehicleType: r.vehicle_type || "",
     vehiclePlate: r.vehicle_plate || "",
+    walletBalance: r.wallet_balance !== null && r.wallet_balance !== undefined ? Number(r.wallet_balance) : 0,
   };
 }
 function mapReport(r) {
@@ -609,6 +610,33 @@ app.post("/api/orders/:id/choose-courier", async (req, res) => {
 });
 
 // Double confirmation de réception — chacun ne peut confirmer que son propre rôle sur SA commande.
+// Dès qu'une commande passe "livrée", la commission due est déduite du
+// portefeuille du/des vendeur(s) concerné(s) — jamais avant, pour ne pas
+// demander au vendeur de payer sur une vente pas encore aboutie. Si plusieurs
+// vendeurs sont présents dans une même commande, chacun paie au prorata de sa part.
+async function settleVendorCommission(orderId) {
+  try {
+    const { rows } = await pool.query("SELECT items, commission FROM orders WHERE id = $1", [orderId]);
+    const order = rows[0];
+    if (!order) return;
+    const items = order.items || [];
+    const totalGoods = items.reduce((s, it) => s + Number(it.price) * Number(it.qty), 0);
+    if (totalGoods <= 0) return;
+    const byVendor = {};
+    items.forEach((it) => {
+      if (!it.vendorPhone) return;
+      byVendor[it.vendorPhone] = (byVendor[it.vendorPhone] || 0) + Number(it.price) * Number(it.qty);
+    });
+    for (const [vendorPhone, subtotal] of Object.entries(byVendor)) {
+      const share = subtotal / totalGoods;
+      const vendorCommission = Number(order.commission) * share;
+      await pool.query("UPDATE profiles SET wallet_balance = wallet_balance - $1 WHERE role = 'vendor' AND phone = $2", [vendorCommission, vendorPhone]);
+    }
+  } catch (e) {
+    console.error("Erreur lors du règlement de la commission vendeur:", e);
+  }
+}
+
 app.post("/api/orders/:id/confirm-courier", async (req, res) => {
   const tokenPhone = await getTokenPhone(req);
   const { rows } = await pool.query("SELECT buyer_confirmed, courier_phone FROM orders WHERE id = $1", [req.params.id]);
@@ -619,6 +647,7 @@ app.post("/api/orders/:id/confirm-courier", async (req, res) => {
     `UPDATE orders SET courier_confirmed = true, courier_confirmed_at = $1 ${status ? ", status = 'livree'" : ""} WHERE id = $2`,
     [Date.now(), req.params.id]
   );
+  if (status === "livree") await settleVendorCommission(req.params.id);
   const { rows: r2 } = await pool.query("SELECT * FROM orders WHERE id = $1", [req.params.id]);
   res.json(mapOrder(r2[0]));
 });
@@ -638,6 +667,7 @@ app.post("/api/orders/:id/confirm-buyer", async (req, res) => {
 
     [Date.now(), req.params.id]
   );
+  if (status === "livree") await settleVendorCommission(req.params.id);
   const { rows: r2 } = await pool.query("SELECT * FROM orders WHERE id = $1", [req.params.id]);
   res.json(mapOrder(r2[0]));
 });
@@ -940,6 +970,8 @@ app.get("/api/vendors/risk", requireOwner, async (req, res) => {
       trialStartedAt: v.trial_started_at ? Number(v.trial_started_at) : null,
       subscriptionStatus: v.subscription_status,
       subscriptionExpiresAt: v.subscription_expires_at ? Number(v.subscription_expires_at) : null,
+      verified: v.verified || false,
+      walletBalance: v.wallet_balance !== null && v.wallet_balance !== undefined ? Number(v.wallet_balance) : 0,
     };
   }).sort((a, b) => (b.openReports - a.openReports) || (b.cancelRate - a.cancelRate));
 
@@ -1012,6 +1044,48 @@ app.post("/api/couriers/:phone/unverify", requireOwner, async (req, res) => {
   logAdminAction("Vérification retirée", req.params.phone);
   res.json({ ok: true });
 });
+
+// Vérification vendeur (même principe que pour les livreurs) — un badge visible
+// par les acheteurs sur les produits de ce vendeur.
+app.post("/api/vendors/:phone/verify", requireOwner, async (req, res) => {
+  await pool.query("UPDATE profiles SET verified = true WHERE role = 'vendor' AND phone = $1", [req.params.phone]);
+  logAdminAction("Vendeur vérifié", req.params.phone);
+  res.json({ ok: true });
+});
+app.post("/api/vendors/:phone/unverify", requireOwner, async (req, res) => {
+  await pool.query("UPDATE profiles SET verified = false WHERE role = 'vendor' AND phone = $1", [req.params.phone]);
+  logAdminAction("Vérification retirée", req.params.phone);
+  res.json({ ok: true });
+});
+
+// Le propriétaire crédite manuellement le portefeuille d'un vendeur (en
+// attendant un vrai rechargement en ligne via CinetPay).
+app.post("/api/vendors/:phone/credit-wallet", requireOwner, async (req, res) => {
+  const amount = Number(req.body.amount);
+  if (!amount || amount <= 0) return res.status(400).json({ error: "Indique un montant valide." });
+  const result = await pool.query("UPDATE profiles SET wallet_balance = wallet_balance + $1 WHERE role = 'vendor' AND phone = $2", [amount, req.params.phone]);
+  if (result.rowCount === 0) return res.status(404).json({ error: "Vendeur introuvable." });
+  logAdminAction("Portefeuille crédité", req.params.phone, `+${amount} F`);
+  res.json({ ok: true });
+});
+
+// Confiance d'un vendeur, visible publiquement par les acheteurs — vérifié +
+// taux de livraisons réussies. Pas de détail sensible (signalements, motifs...).
+app.get("/api/vendors/:phone/trust", async (req, res) => {
+  const { rows: prof } = await pool.query("SELECT verified FROM profiles WHERE role = 'vendor' AND phone = $1", [req.params.phone]);
+  const { rows: orderRows } = await pool.query(
+    `SELECT status FROM orders o WHERE EXISTS (
+       SELECT 1 FROM jsonb_array_elements(o.items) it WHERE it->>'vendorPhone' = $1
+     ) AND status != 'nouvelle'`,
+    [req.params.phone]
+  );
+  const total = orderRows.length;
+  const delivered = orderRows.filter((o) => o.status === "livree").length;
+  const cancelled = orderRows.filter((o) => o.status === "annulee").length;
+  const successRate = total > 0 ? Math.round((delivered / (delivered + cancelled || 1)) * 100) : null;
+  res.json({ verified: prof[0]?.verified || false, successRate, totalOrders: total });
+});
+
 app.get("/api/couriers", requireOwner, async (req, res) => {
   const { rows } = await pool.query("SELECT * FROM profiles WHERE role = 'courier' ORDER BY trial_started_at DESC");
   res.json(rows.map(mapProfile));
