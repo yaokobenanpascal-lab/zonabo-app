@@ -326,6 +326,14 @@ function SubscriptionGate({ role, info, trialDays, accessFee, color, children })
           <p className="f-mono text-[10px] text-[#2D6A4F]">✓ Abonnement actif jusqu'au {new Date(info.subscriptionExpiresAt).toLocaleDateString("fr-FR")}</p>
         </div>
       )}
+      {role === "vendor" && (
+        <div className="max-w-5xl mx-auto px-4 pt-2">
+          <p className={`f-mono text-[10px] ${info.walletBalance < 0 ? "text-[#C1440E]" : "text-[#14213D]/40"}`}>
+            💰 Portefeuille commission : {Math.round(info.walletBalance || 0).toLocaleString("fr-FR")} F
+            {info.walletBalance < 0 && " — contacte le propriétaire pour recharger"}
+          </p>
+        </div>
+      )}
       {children}
     </>
   );
@@ -382,6 +390,31 @@ function RatingBadge({ phone, compact = false }) {
   }, [phone]);
   if (!rating || rating.count === 0) return compact ? null : <span className="f-mono text-[10px] text-[#14213D]/30">Pas encore noté</span>;
   return <span className="f-mono text-[10px] text-[#14213D]/60">★ {rating.average} ({rating.count})</span>;
+}
+
+// Badge de confiance vendeur — vérifié + taux de livraisons réussies, visible
+// par l'acheteur avant même de commander.
+const vendorTrustCache = new Map();
+function VendorTrustBadge({ phone }) {
+  const [trust, setTrust] = useState(vendorTrustCache.get(phone) || null);
+  useEffect(() => {
+    let cancelled = false;
+    if (vendorTrustCache.has(phone)) { setTrust(vendorTrustCache.get(phone)); return; }
+    apiGet(`/api/vendors/${encodeURIComponent(phone)}/trust`).then((t) => {
+      vendorTrustCache.set(phone, t);
+      if (!cancelled) setTrust(t);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [phone]);
+  if (!trust) return null;
+  return (
+    <span className="f-mono text-[10px] flex items-center gap-1.5 flex-wrap">
+      {trust.verified && <span className="text-[#2D6A4F]">✓ Vendeur vérifié</span>}
+      {trust.successRate !== null && trust.totalOrders >= 3 && (
+        <span className="text-[#14213D]/40">{trust.successRate}% de livraisons réussies</span>
+      )}
+    </span>
+  );
 }
 
 // Reçu imprimable pour une commande — s'ouvre en superposition, le contenu de
@@ -1369,6 +1402,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                       <h4 className="f-display font-semibold text-[#14213D] text-sm leading-snug">{p.name}</h4>
                     </div>
                     <p className="f-mono text-[10px] text-[#14213D]/40 mt-1 flex items-center gap-1.5">{p.vendorName} · {zoneLabel(p.zone)} <RatingBadge phone={p.vendorPhone} compact /></p>
+                    <div className="mt-0.5"><VendorTrustBadge phone={p.vendorPhone} /></div>
                     {p.description && <p className="f-body text-[11px] text-[#14213D]/50 mt-1 line-clamp-2">{p.description}</p>}
                     <div className="flex items-center gap-2 mt-2">
                       <span className="f-mono text-[10px] text-[#14213D]/50 bg-[#14213D]/5 px-1.5 py-0.5 rounded">Stock: {p.stock ?? 0}</span>
@@ -2588,6 +2622,22 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
     await apiSend(`/api/couriers/${encodeURIComponent(phone)}/${verified ? "unverify" : "verify"}`, "POST", undefined, ownerToken);
     loadCouriersAndRefunds();
   }
+  async function toggleVendorVerified(phone, verified) {
+    await apiSend(`/api/vendors/${encodeURIComponent(phone)}/${verified ? "unverify" : "verify"}`, "POST", undefined, ownerToken);
+    loadRisk();
+  }
+  async function creditVendorWallet(phone) {
+    const input = prompt("Combien créditer au portefeuille de ce vendeur (FCFA) ?", "5000");
+    if (!input) return;
+    const amount = Number(input);
+    if (!amount || amount <= 0) return;
+    try {
+      await apiSend(`/api/vendors/${encodeURIComponent(phone)}/credit-wallet`, "POST", { amount }, ownerToken);
+      loadRisk();
+    } catch (e) {
+      alert(e.message || "Impossible de créditer le portefeuille.");
+    }
+  }
   async function markRefundDone(orderId) {
     await apiSend(`/api/orders/${orderId}/refund-done`, "POST", undefined, ownerToken);
     loadCouriersAndRefunds();
@@ -2890,11 +2940,15 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
             <div key={v.phone} className={`border-2 rounded-xl p-3 ${v.suspended ? "border-[#14213D]/10 bg-[#14213D]/5 opacity-60" : v.risky ? "border-[#C1440E]/30" : "border-[#14213D]/10"}`}>
               <div className="flex items-center justify-between">
                 <span className="f-body text-xs font-semibold text-[#14213D]">{v.name || "Sans nom"} <span className="f-mono text-[10px] text-[#14213D]/40">· {v.phone}</span></span>
+                {v.verified && <span className="f-mono text-[9px] bg-[#2D6A4F] text-white px-2 py-0.5 rounded-full">✓ VÉRIFIÉ</span>}
                 {v.suspended && <span className="f-mono text-[9px] bg-[#14213D] text-white px-2 py-0.5 rounded-full">SUSPENDU</span>}
                 {!v.suspended && v.risky && <span className="f-mono text-[9px] bg-[#C1440E] text-white px-2 py-0.5 rounded-full">À RISQUE</span>}
               </div>
               <p className="f-mono text-[10px] text-[#14213D]/50 mt-1">
                 {v.totalOrders} commande(s) · {v.cancelRate}% annulées · {v.openReports} signalement(s) ouvert(s)
+              </p>
+              <p className={`f-mono text-[10px] mt-0.5 ${v.walletBalance < 0 ? "text-[#C1440E]" : "text-[#14213D]/40"}`}>
+                💰 Portefeuille : {Math.round(v.walletBalance).toLocaleString("fr-FR")} F
               </p>
               {!v.suspended && (() => {
                 const acc = getAccessState(v, trialDays);
@@ -2918,9 +2972,13 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
                   </div>
                 </div>
               ) : (
-                <div className="flex gap-2 mt-2">
+                <div className="flex gap-2 mt-2 flex-wrap">
                   <button onClick={() => setSuspendReasonFor(v.phone)} className="f-mono text-[10px] bg-[#14213D]/10 text-[#14213D] px-3 py-1.5 rounded-full">Suspendre</button>
                   <button onClick={() => grantAccess("vendor", v.phone)} className="f-mono text-[10px] bg-[#2D6A4F]/10 text-[#2D6A4F] px-3 py-1.5 rounded-full">🎁 Accès gratuit</button>
+                  <button onClick={() => toggleVendorVerified(v.phone, v.verified)} className={`f-mono text-[10px] px-3 py-1.5 rounded-full ${v.verified ? "bg-[#2D6A4F] text-white" : "bg-[#14213D]/10 text-[#14213D]"}`}>
+                    {v.verified ? "✓ Vérifié" : "Marquer vérifié"}
+                  </button>
+                  <button onClick={() => creditVendorWallet(v.phone)} className="f-mono text-[10px] bg-[#F2A93B]/20 text-[#14213D] px-3 py-1.5 rounded-full">💰 Créditer</button>
                 </div>
               )}
             </div>
