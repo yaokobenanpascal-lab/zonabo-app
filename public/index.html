@@ -1136,7 +1136,7 @@ function ChangePhoneNumber({ role, info, accentColor, onChanged }) {
   );
 }
 
-function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, registerBuyer, logoutBuyer, placeOrder, cancelOrder, showCart, setShowCart, myOrders, chooseCourierForOrder, confirmDeliveryByBuyer, proposeTransport, confirmTransport, tip }) {
+function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, registerBuyer, logoutBuyer, placeOrder, cancelOrder, deleteMyOrder, showCart, setShowCart, myOrders, chooseCourierForOrder, confirmDeliveryByBuyer, proposeTransport, confirmTransport, tip }) {
   const [category, setCategory] = useState("");
   const [search, setSearch] = useState("");
   const [visibleCount, setVisibleCount] = useState(20);
@@ -1536,6 +1536,14 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                 ) : (
                   <button onClick={() => setReportingOrderId(o.id)} className="f-mono text-[10px] text-[#14213D]/35 hover:text-[#C1440E] underline mt-2">Signaler un problème avec cette commande</button>
                 )
+              )}
+              {["nouvelle", "annulee"].includes(o.status) && (
+                <button
+                  onClick={() => { if (window.confirm("Supprimer définitivement cette commande ? Cette action est irréversible.")) deleteMyOrder(o.id); }}
+                  className="f-mono text-[10px] text-[#14213D]/35 hover:text-[#C1440E] underline mt-2 block"
+                >
+                  🗑️ Supprimer cette commande
+                </button>
               )}
             </div>
           ))}
@@ -2497,6 +2505,25 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
   const [showNotes, setShowNotes] = useState(false);
   const [noteDraft, setNoteDraft] = useState("");
   const [notesBusy, setNotesBusy] = useState(false);
+  const [resetConfirmText, setResetConfirmText] = useState("");
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetError, setResetError] = useState("");
+  const [resetDone, setResetDone] = useState(false);
+
+  async function resetTestData() {
+    if (resetConfirmText !== "SUPPRIMER TOUT") return;
+    if (!window.confirm("Dernière confirmation : ceci va supprimer DÉFINITIVEMENT tous les produits, commandes, comptes acheteur/vendeur/livreur. Continuer ?")) return;
+    setResetBusy(true);
+    setResetError("");
+    try {
+      await apiSend("/api/admin/reset-test-data", "POST", { confirm: resetConfirmText }, ownerToken);
+      setResetDone(true);
+      setResetConfirmText("");
+    } catch (e) {
+      setResetError(e.message || "Erreur pendant la réinitialisation.");
+    }
+    setResetBusy(false);
+  }
 
   async function loadNotes() {
     try {
@@ -2706,6 +2733,34 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
         <p className="f-body text-xs text-[#14213D]/40 mt-2">
           Le code d'accès propriétaire se change côté serveur (variable d'environnement <code>OWNER_PASSCODE</code> chez ton hébergeur), pas depuis cette page — voir le README.
         </p>
+      </div>
+
+      <div className="ticket bg-white border-2 border-[#C1440E]/30 p-4 mb-6">
+        <p className="f-mono text-[11px] uppercase tracking-wide text-[#C1440E] mb-2">⚠️ Zone de danger</p>
+        <p className="f-body text-xs text-[#14213D]/60 mb-3">
+          Supprime définitivement tous les produits, commandes, et comptes acheteur/vendeur/livreur — pour repartir sur une base neuve avant un vrai lancement commercial. Tes réglages, le contenu de la plateforme, et tes notes d'équipe sont conservés. <strong>Cette action est irréversible.</strong>
+        </p>
+        {resetDone ? (
+          <p className="f-body text-sm text-[#2D6A4F]">✓ Toutes les données de test ont été supprimées.</p>
+        ) : (
+          <>
+            <p className="f-body text-xs text-[#14213D]/50 mb-1.5">Pour confirmer, tape exactement : <code className="bg-[#14213D]/5 px-1 rounded">SUPPRIMER TOUT</code></p>
+            <input
+              value={resetConfirmText}
+              onChange={(e) => setResetConfirmText(e.target.value)}
+              placeholder="SUPPRIMER TOUT"
+              className="f-mono w-full px-3 py-2 rounded-lg border-2 border-[#C1440E]/30 text-sm mb-2"
+            />
+            {resetError && <p className="f-body text-xs text-[#C1440E] mb-2">{resetError}</p>}
+            <button
+              disabled={resetConfirmText !== "SUPPRIMER TOUT" || resetBusy}
+              onClick={resetTestData}
+              className="w-full f-mono text-xs bg-[#C1440E] disabled:opacity-30 text-white py-2.5 rounded-full"
+            >
+              {resetBusy ? "Suppression…" : "🗑️ Supprimer toutes les données de test"}
+            </button>
+          </>
+        )}
       </div>
 
       <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
@@ -3192,6 +3247,12 @@ function App() {
     const updated = await apiSend(`/api/orders/${id}`, "PATCH", { status: "annulee" }, token);
     setOrders((prev) => prev.map((o) => (o.id === id ? updated : o)));
   }
+  // Supprime définitivement une commande (nouvelle ou annulée) de l'historique
+  // de l'acheteur — utile pour nettoyer des commandes de test.
+  async function deleteMyOrder(id) {
+    await apiSend(`/api/orders/${id}`, "DELETE", { phone: buyerInfo.phone }, getPhoneToken(buyerInfo.phone));
+    setOrders((prev) => prev.filter((o) => o.id !== id));
+  }
   // Un livreur propose (ou met à jour) son prix pour une commande — n'assigne rien
   // encore, ça reste une simple proposition tant que l'acheteur n'a pas choisi.
   async function submitCourierBid(id, courier, fee) {
@@ -3237,7 +3298,7 @@ function App() {
               products={products} zone={zone} setZone={setZone}
               cart={cart} setCart={setCart}
               buyerInfo={buyerInfo} registerBuyer={registerBuyer} logoutBuyer={logoutBuyer}
-              placeOrder={placeOrder} cancelOrder={cancelOrder} showCart={showCart} setShowCart={setShowCart}
+              placeOrder={placeOrder} cancelOrder={cancelOrder} deleteMyOrder={deleteMyOrder} showCart={showCart} setShowCart={setShowCart}
               myOrders={myOrders} chooseCourierForOrder={chooseCourierForOrder} confirmDeliveryByBuyer={confirmDeliveryByBuyer}
               proposeTransport={proposeTransport} confirmTransport={confirmTransport}
               tip={siteContent.tipBuyer}
