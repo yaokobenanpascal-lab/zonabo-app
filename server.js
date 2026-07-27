@@ -542,6 +542,24 @@ app.patch("/api/orders/:id", async (req, res) => {
   res.json(updated);
 });
 
+// L'acheteur peut supprimer définitivement une commande qui n'a jamais vraiment
+// abouti (nouvelle, jamais confirmée, ou annulée) — utile pour nettoyer des
+// commandes de test. On protège quand même les commandes payées en ligne dont
+// le remboursement n'a pas encore été traité, pour ne pas perdre cette trace.
+app.delete("/api/orders/:id", requirePhone((req) => req.body.phone), async (req, res) => {
+  const { rows } = await pool.query("SELECT buyer_phone, status, paid, refund_status FROM orders WHERE id = $1", [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: "Commande introuvable." });
+  if (req.body.phone !== rows[0].buyer_phone) return res.status(403).json({ error: "Ce n'est pas ta commande." });
+  if (!["nouvelle", "annulee"].includes(rows[0].status)) {
+    return res.status(400).json({ error: "Seules les commandes nouvelles ou annulées peuvent être supprimées." });
+  }
+  if (rows[0].paid && rows[0].refund_status && rows[0].refund_status !== "done") {
+    return res.status(400).json({ error: "Cette commande payée doit d'abord être remboursée avant suppression — contacte le propriétaire de la plateforme." });
+  }
+  await pool.query("DELETE FROM orders WHERE id = $1", [req.params.id]);
+  res.json({ ok: true });
+});
+
 // Un livreur propose (ou met à jour) son prix — seulement en son propre nom.
 // Même logique que côté client (getAccessState) : jours restants sur l'essai
 // gratuit, ou sur l'abonnement payant s'il est actif.
@@ -1024,6 +1042,40 @@ app.post("/api/access/:role/:phone/grant", requireOwner, async (req, res) => {
 app.get("/api/admin-actions", requireOwner, async (req, res) => {
   const { rows } = await pool.query("SELECT * FROM admin_actions ORDER BY created_at DESC LIMIT 100");
   res.json(rows.map((r) => ({ id: r.id, action: r.action, target: r.target, details: r.details, createdAt: Number(r.created_at) })));
+});
+
+// Notes/tâches partagées — même code propriétaire, en vue de futurs collaborateurs.
+// Réinitialisation complète des données de "test" (produits, commandes, comptes
+// acheteur/vendeur/livreur, notes, signalements...) — pour repartir sur une base
+// neuve avant un vrai lancement commercial. Les réglages et le contenu de la
+// plateforme (settings, site_content) et les notes d'équipe sont conservés.
+app.post("/api/admin/reset-test-data", requireOwner, async (req, res) => {
+  if (req.body.confirm !== "SUPPRIMER TOUT") {
+    return res.status(400).json({ error: "Confirmation incorrecte — tape exactement « SUPPRIMER TOUT »." });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("DELETE FROM ratings");
+    await client.query("DELETE FROM vendor_reports");
+    await client.query("DELETE FROM order_idempotency");
+    await client.query("DELETE FROM orders");
+    await client.query("DELETE FROM products");
+    await client.query("DELETE FROM otp_codes");
+    await client.query("DELETE FROM verified_phones");
+    await client.query("DELETE FROM phone_tokens");
+    await client.query("DELETE FROM profiles");
+    await client.query("DELETE FROM admin_actions");
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.error("Erreur lors de la réinitialisation des données de test:", e);
+    client.release();
+    return res.status(500).json({ error: "Erreur pendant la réinitialisation." });
+  }
+  client.release();
+  logAdminAction("Réinitialisation complète des données de test", null, null);
+  res.json({ ok: true });
 });
 
 // Notes/tâches partagées — même code propriétaire, en vue de futurs collaborateurs.
