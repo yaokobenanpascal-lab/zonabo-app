@@ -271,5 +271,6 @@ CREATE TABLE IF NOT EXISTS withdrawal_requests (
   account_info TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending', -- pending | done
   created_at BIGINT NOT NULL,
-  done_at BIGINT
+  done_at BIGINT,
+  vendor_phone TEXT -- NULL = retrait du propriétaire ; rempli = retrait de ce vendeur
 );
