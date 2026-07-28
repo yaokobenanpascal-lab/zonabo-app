@@ -2587,6 +2587,49 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
   const [resetBusy, setResetBusy] = useState(false);
   const [resetError, setResetError] = useState("");
   const [resetDone, setResetDone] = useState(false);
+  const [revenue, setRevenue] = useState(null);
+  const [withdrawals, setWithdrawals] = useState([]);
+  const [showWithdrawals, setShowWithdrawals] = useState(false);
+  const [wAmount, setWAmount] = useState("");
+  const [wMethod, setWMethod] = useState("mobile_money");
+  const [wAccountInfo, setWAccountInfo] = useState("");
+  const [wBusy, setWBusy] = useState(false);
+  const [wError, setWError] = useState("");
+
+  async function loadRevenueAndWithdrawals() {
+    try {
+      const [r, w] = await Promise.all([
+        apiSend("/api/admin/revenue", "GET", undefined, ownerToken),
+        apiSend("/api/admin/withdrawals", "GET", undefined, ownerToken),
+      ]);
+      setRevenue(r);
+      setWithdrawals(w);
+    } catch (e) {
+      console.error("Erreur de chargement des revenus:", e);
+    }
+  }
+  useEffect(() => { if (ownerToken) loadRevenueAndWithdrawals(); }, [ownerToken]);
+
+  async function requestWithdrawal() {
+    setWError("");
+    const amount = Number(wAmount);
+    if (!amount || amount <= 0) { setWError("Indique un montant valide."); return; }
+    if (!wAccountInfo.trim()) { setWError("Indique les coordonnées du compte de réception."); return; }
+    setWBusy(true);
+    try {
+      await apiSend("/api/admin/withdrawals", "POST", { amount, method: wMethod, accountInfo: wAccountInfo.trim() }, ownerToken);
+      setWAmount("");
+      setWAccountInfo("");
+      loadRevenueAndWithdrawals();
+    } catch (e) {
+      setWError(e.message || "Erreur pendant la demande de retrait.");
+    }
+    setWBusy(false);
+  }
+  async function markWithdrawalDone(id) {
+    await apiSend(`/api/admin/withdrawals/${id}/done`, "POST", undefined, ownerToken);
+    loadRevenueAndWithdrawals();
+  }
 
   async function resetTestData() {
     if (resetConfirmText !== "SUPPRIMER TOUT") return;
@@ -2827,6 +2870,68 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
         <p className="f-body text-xs text-[#14213D]/40 mt-2">
           Le code d'accès propriétaire se change côté serveur (variable d'environnement <code>OWNER_PASSCODE</code> chez ton hébergeur), pas depuis cette page — voir le README.
         </p>
+      </div>
+
+      <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
+        <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-3">💰 Mes commissions</p>
+        {revenue && (
+          <div className="grid grid-cols-2 gap-3 mb-4">
+            <div>
+              <p className="f-mono text-[9px] uppercase text-[#14213D]/40">Commission générée (théorique)</p>
+              <p className="f-display font-semibold text-lg text-[#14213D]">{Math.round(revenue.commissionGenerated).toLocaleString("fr-FR")} F</p>
+            </div>
+            <div>
+              <p className="f-mono text-[9px] uppercase text-[#14213D]/40">Réellement encaissé (CinetPay)</p>
+              <p className="f-display font-semibold text-lg text-[#2D6A4F]">{Math.round(revenue.realCollected).toLocaleString("fr-FR")} F</p>
+            </div>
+            <div>
+              <p className="f-mono text-[9px] uppercase text-[#14213D]/40">Déjà retiré</p>
+              <p className="f-body text-sm text-[#14213D]/60">{Math.round(revenue.alreadyWithdrawn).toLocaleString("fr-FR")} F</p>
+            </div>
+            <div>
+              <p className="f-mono text-[9px] uppercase text-[#14213D]/40">Disponible pour retrait</p>
+              <p className="f-body text-sm text-[#14213D] font-semibold">{Math.round(revenue.availableToWithdraw).toLocaleString("fr-FR")} F</p>
+            </div>
+          </div>
+        )}
+        <p className="f-body text-[11px] text-[#14213D]/40 mb-3">
+          ⚠️ Le transfert automatique vers ta banque/Mobile Money nécessite le service "Transfert d'argent" de CinetPay (contrat séparé, en attente de leur réponse). En attendant, chaque demande ci-dessous reste "en attente" — tu effectues le virement toi-même de ton côté, puis tu la marques "faite".
+        </p>
+        <div className="space-y-2 mb-3">
+          <div className="grid grid-cols-2 gap-2">
+            <input type="number" placeholder="Montant (FCFA)" value={wAmount} onChange={(e) => setWAmount(e.target.value)} className="f-body px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm" />
+            <select value={wMethod} onChange={(e) => setWMethod(e.target.value)} className="f-body px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm bg-white">
+              <option value="mobile_money">Mobile Money</option>
+              <option value="bank">Compte bancaire</option>
+            </select>
+          </div>
+          <input placeholder={wMethod === "bank" ? "Numéro de compte / IBAN" : "Numéro Mobile Money"} value={wAccountInfo} onChange={(e) => setWAccountInfo(e.target.value)} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm" />
+          {wError && <p className="f-body text-xs text-[#C1440E]">{wError}</p>}
+          <button disabled={wBusy} onClick={requestWithdrawal} className="w-full f-mono text-xs bg-[#14213D] disabled:opacity-40 text-white py-2.5 rounded-full">
+            {wBusy ? "…" : "Demander un retrait"}
+          </button>
+        </div>
+        <button onClick={() => setShowWithdrawals((s) => !s)} className="f-mono text-[10px] text-[#14213D]/40 hover:text-[#14213D] underline">
+          {showWithdrawals ? "Masquer l'historique" : "Voir l'historique des retraits"}
+        </button>
+        {showWithdrawals && (
+          <div className="mt-2 space-y-1.5 max-h-64 overflow-y-auto">
+            {withdrawals.length === 0 && <p className="f-body text-xs text-[#14213D]/40">Aucune demande pour l'instant.</p>}
+            {withdrawals.map((w) => (
+              <div key={w.id} className="flex items-center justify-between border-b border-dashed border-[#14213D]/10 pb-1.5">
+                <div>
+                  <p className="f-body text-xs text-[#14213D]">{Math.round(w.amount).toLocaleString("fr-FR")} F · {w.method === "bank" ? "Banque" : "Mobile Money"}</p>
+                  <p className="f-mono text-[9px] text-[#14213D]/40">{w.accountInfo} · {new Date(w.createdAt).toLocaleDateString("fr-FR")}</p>
+                </div>
+                {w.status === "done" ? (
+                  <span className="f-mono text-[9px] bg-[#2D6A4F]/10 text-[#2D6A4F] px-2 py-0.5 rounded-full">✓ Faite</span>
+                ) : (
+                  <button onClick={() => markWithdrawalDone(w.id)} className="f-mono text-[9px] bg-[#14213D]/10 text-[#14213D] px-2 py-1 rounded-full">Marquer faite</button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="ticket bg-white border-2 border-[#C1440E]/30 p-4 mb-6">
