@@ -258,3 +258,18 @@ ALTER TABLE profiles ADD COLUMN IF NOT EXISTS password_hash TEXT;
 -- Le propriétaire crédite ce solde manuellement pour l'instant (en attendant
 -- un vrai rechargement en ligne via CinetPay).
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS wallet_balance NUMERIC NOT NULL DEFAULT 0;
+
+-- Demandes de retrait du propriétaire (commissions encaissées → banque/Mobile
+-- Money). Enregistrées ici pour préparer le terrain ; l'exécution réelle du
+-- transfert dépend du service "Transfert d'argent" de CinetPay (contrat séparé,
+-- pas encore actif) — en attendant, le propriétaire les traite lui-même
+-- manuellement et les marque "faites" une fois l'argent envoyé.
+CREATE TABLE IF NOT EXISTS withdrawal_requests (
+  id TEXT PRIMARY KEY,
+  amount NUMERIC NOT NULL,
+  method TEXT NOT NULL, -- 'bank' ou 'mobile_money'
+  account_info TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending', -- pending | done
+  created_at BIGINT NOT NULL,
+  done_at BIGINT
+);
