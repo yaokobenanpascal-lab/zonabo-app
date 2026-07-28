@@ -240,8 +240,38 @@ function SubscriptionGate({ role, info, trialDays, accessFee, color, children })
   const [paying, setPaying] = useState(false);
   const [payError, setPayError] = useState("");
   const [payNotice, setPayNotice] = useState("");
+  const [topupAmount, setTopupAmount] = useState("2000");
+  const [topupBusy, setTopupBusy] = useState(false);
+  const [topupNotice, setTopupNotice] = useState("");
+  const [topupError, setTopupError] = useState("");
   const { subscriptionActive, trialActive, daysLeft, granted } = getAccessState(info, trialDays);
   const roleLabel = role === "vendor" ? "vendeur" : "livreur";
+
+  async function payWalletTopup() {
+    const amount = Number(topupAmount);
+    if (!amount || amount < 500) { setTopupError("Le montant minimum est de 500 F."); return; }
+    setTopupError("");
+    setTopupNotice("");
+    setTopupBusy(true);
+    try {
+      const transactionId = `ZK-WALLET-${info.phone}-${Date.now()}`;
+      await apiSend("/api/payments/pending", "POST", { transactionId, kind: "wallet_topup", phone: info.phone, amount });
+      launchCinetPaySubscription({
+        transactionId,
+        amount,
+        description: `Recharge portefeuille Zonako Vendeur`,
+        customer: { name: info.name, phone: info.phone },
+        onSuccess: () => {
+          setTopupBusy(false);
+          setTopupNotice("Paiement reçu — vérification en cours, ton portefeuille sera crédité dans quelques instants.");
+        },
+        onError: (msg) => { setTopupBusy(false); setTopupError(msg); },
+      });
+    } catch (e) {
+      setTopupBusy(false);
+      setTopupError("Erreur pendant la préparation du paiement. Réessaie.");
+    }
+  }
 
   async function pay() {
     setPayError("");
@@ -330,8 +360,22 @@ function SubscriptionGate({ role, info, trialDays, accessFee, color, children })
         <div className="max-w-5xl mx-auto px-4 pt-2">
           <p className={`f-mono text-[10px] ${info.walletBalance < 0 ? "text-[#C1440E]" : "text-[#14213D]/40"}`}>
             💰 Portefeuille commission : {Math.round(info.walletBalance || 0).toLocaleString("fr-FR")} F
-            {info.walletBalance < 0 && " — contacte le propriétaire pour recharger"}
+            {info.walletBalance < 0 && " — recharge ci-dessous ou contacte le propriétaire"}
           </p>
+          <div className="flex items-center gap-2 mt-1.5">
+            <input
+              type="number"
+              value={topupAmount}
+              onChange={(e) => setTopupAmount(e.target.value)}
+              className="f-body w-28 px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs"
+              placeholder="Montant"
+            />
+            <button disabled={topupBusy} onClick={payWalletTopup} className="f-mono text-[10px] bg-[#F2A93B] text-[#14213D] px-3 py-1.5 rounded-full disabled:opacity-40">
+              {topupBusy ? "…" : "Recharger (Mobile Money / Carte)"}
+            </button>
+          </div>
+          {topupNotice && <p className="f-body text-[10px] text-[#2D6A4F] mt-1">{topupNotice}</p>}
+          {topupError && <p className="f-body text-[10px] text-[#C1440E] mt-1">{topupError}</p>}
         </div>
       )}
       {children}
