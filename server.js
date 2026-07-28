@@ -185,6 +185,8 @@ function mapProduct(r) {
     vendorName: r.vendor_name, vendorPhone: r.vendor_phone, createdAt: Number(r.created_at),
     description: r.description || "", vendorLandmark: r.vendor_landmark || "",
     imageUrls: r.image_urls && r.image_urls.length ? r.image_urls : (r.image_url ? [r.image_url] : []),
+    videoUrl: r.video_url || "",
+    videoUrls: r.video_urls && r.video_urls.length ? r.video_urls : (r.video_url ? [r.video_url] : []),
   };
 }
 function mapOrder(r) {
@@ -392,10 +394,13 @@ app.post("/api/products", requirePhone((req) => req.body.vendorPhone), async (re
   // Jusqu'à 5 photos par produit. La première sert de photo de couverture (image_url).
   const imageUrls = Array.isArray(p.imageUrls) ? p.imageUrls.slice(0, 5) : (p.imageUrl ? [p.imageUrl] : []);
   const coverImage = imageUrls[0] || p.imageUrl || "";
+  // Jusqu'à 5 vidéos par produit (même principe que les photos).
+  const videoUrls = Array.isArray(p.videoUrls) ? p.videoUrls.slice(0, 5) : (p.videoUrl ? [p.videoUrl] : []);
+  const coverVideo = videoUrls[0] || p.videoUrl || "";
   await pool.query(
-    `INSERT INTO products (id, name, price, category, zone, stock, image_url, delivery_time, vendor_name, vendor_phone, created_at, description, vendor_landmark, image_urls)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-    [id, p.name, p.price, p.category, p.zone, p.stock || 0, coverImage, p.deliveryTime || "Non précisé", p.vendorName, p.vendorPhone, createdAt, p.description || "", landmark, JSON.stringify(imageUrls)]
+    `INSERT INTO products (id, name, price, category, zone, stock, image_url, delivery_time, vendor_name, vendor_phone, created_at, description, vendor_landmark, image_urls, video_url, video_urls)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+    [id, p.name, p.price, p.category, p.zone, p.stock || 0, coverImage, p.deliveryTime || "Non précisé", p.vendorName, p.vendorPhone, createdAt, p.description || "", landmark, JSON.stringify(imageUrls), coverVideo, JSON.stringify(videoUrls)]
   );
   const { rows } = await pool.query("SELECT * FROM products WHERE id = $1", [id]);
   res.json(mapProduct(rows[0]));
@@ -415,6 +420,13 @@ app.patch("/api/products/:id", async (req, res) => {
   if (patch.deliveryTime !== undefined) { sets.push(`delivery_time = $${i++}`); vals.push(patch.deliveryTime); }
   if (patch.description !== undefined) { sets.push(`description = $${i++}`); vals.push(patch.description); }
   if (patch.vendorLandmark !== undefined) { sets.push(`vendor_landmark = $${i++}`); vals.push(patch.vendorLandmark); }
+  if (Array.isArray(patch.videoUrls)) {
+    const videoUrls = patch.videoUrls.slice(0, 5);
+    sets.push(`video_urls = $${i++}`); vals.push(JSON.stringify(videoUrls));
+    sets.push(`video_url = $${i++}`); vals.push(videoUrls[0] || "");
+  } else if (patch.videoUrl !== undefined) {
+    sets.push(`video_url = $${i++}`); vals.push(patch.videoUrl);
+  }
   if (Array.isArray(patch.imageUrls)) {
     const imageUrls = patch.imageUrls.slice(0, 5);
     sets.push(`image_urls = $${i++}`); vals.push(JSON.stringify(imageUrls));
