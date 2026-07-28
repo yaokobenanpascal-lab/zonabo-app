@@ -1764,8 +1764,49 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
   const [savingLandmark, setSavingLandmark] = useState(false);
   const [showStats, setShowStats] = useState(false);
   const [receiptOrder, setReceiptOrder] = useState(null);
+  const [revenue, setRevenue] = useState(null);
+  const [vWithdrawals, setVWithdrawals] = useState([]);
+  const [showVWithdrawals, setShowVWithdrawals] = useState(false);
+  const [vwAmount, setVwAmount] = useState("");
+  const [vwMethod, setVwMethod] = useState("mobile_money");
+  const [vwAccountInfo, setVwAccountInfo] = useState("");
+  const [vwBusy, setVwBusy] = useState(false);
+  const [vwError, setVwError] = useState("");
   const myProducts = products.filter((p) => p.vendorPhone === vendorInfo.phone);
   const myOrders = orders.filter((o) => o.items.some((it) => myProducts.some((p) => p.id === it.id)));
+
+  async function loadVendorRevenue() {
+    try {
+      const token = getPhoneToken(vendorInfo.phone);
+      const [r, w] = await Promise.all([
+        apiSend(`/api/vendors/${encodeURIComponent(vendorInfo.phone)}/revenue`, "GET", undefined, token),
+        apiSend(`/api/vendors/${encodeURIComponent(vendorInfo.phone)}/withdrawals`, "GET", undefined, token),
+      ]);
+      setRevenue(r);
+      setVWithdrawals(w);
+    } catch (e) {
+      console.error("Erreur de chargement du solde vendeur:", e);
+    }
+  }
+  useEffect(() => { if (vendorInfo.phone) loadVendorRevenue(); }, [vendorInfo.phone]);
+
+  async function requestVendorWithdrawal() {
+    setVwError("");
+    const amount = Number(vwAmount);
+    if (!amount || amount <= 0) { setVwError("Indique un montant valide."); return; }
+    if (!vwAccountInfo.trim()) { setVwError("Indique les coordonnées du compte de réception."); return; }
+    setVwBusy(true);
+    try {
+      const token = getPhoneToken(vendorInfo.phone);
+      await apiSend(`/api/vendors/${encodeURIComponent(vendorInfo.phone)}/withdrawals`, "POST", { amount, method: vwMethod, accountInfo: vwAccountInfo.trim() }, token);
+      setVwAmount("");
+      setVwAccountInfo("");
+      loadVendorRevenue();
+    } catch (e) {
+      setVwError(e.message || "Erreur pendant la demande de retrait.");
+    }
+    setVwBusy(false);
+  }
 
   async function saveLandmark() {
     setSavingLandmark(true);
@@ -1925,6 +1966,56 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
           <p className="f-mono text-[10px] uppercase text-[#14213D]/40">Net cumulé</p>
         </div>
       </div>
+
+      {revenue && (revenue.pendingProceeds > 0 || revenue.availableProceeds > 0 || vWithdrawals.length > 0) && (
+        <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
+          <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-1">💳 Paiements en ligne (séquestre)</p>
+          <p className="f-body text-[11px] text-[#14213D]/40 mb-3">L'argent des commandes payées en ligne reste bloqué chez Zonako jusqu'à ce que l'acheteur confirme avoir reçu son colis — ensuite, il devient disponible ici.</p>
+          <div className="grid grid-cols-2 gap-3 mb-3">
+            <div>
+              <p className="f-mono text-[9px] uppercase text-[#14213D]/40">En attente de livraison</p>
+              <p className="f-display font-semibold text-base text-[#14213D]/60">{Math.round(revenue.pendingProceeds).toLocaleString("fr-FR")} F</p>
+            </div>
+            <div>
+              <p className="f-mono text-[9px] uppercase text-[#14213D]/40">Disponible pour retrait</p>
+              <p className="f-display font-semibold text-base text-[#2D6A4F]">{Math.round(revenue.availableToWithdraw).toLocaleString("fr-FR")} F</p>
+            </div>
+          </div>
+          {revenue.availableToWithdraw > 0 && (
+            <div className="space-y-2 mb-2">
+              <div className="grid grid-cols-2 gap-2">
+                <input type="number" placeholder="Montant (FCFA)" value={vwAmount} onChange={(e) => setVwAmount(e.target.value)} className="f-body px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm" />
+                <select value={vwMethod} onChange={(e) => setVwMethod(e.target.value)} className="f-body px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm bg-white">
+                  <option value="mobile_money">Mobile Money</option>
+                  <option value="bank">Compte bancaire</option>
+                </select>
+              </div>
+              <input placeholder={vwMethod === "bank" ? "Numéro de compte / IBAN" : "Numéro Mobile Money"} value={vwAccountInfo} onChange={(e) => setVwAccountInfo(e.target.value)} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm" />
+              {vwError && <p className="f-body text-xs text-[#C1440E]">{vwError}</p>}
+              <button disabled={vwBusy} onClick={requestVendorWithdrawal} className="w-full f-mono text-xs bg-[#2D6A4F] disabled:opacity-40 text-white py-2.5 rounded-full">
+                {vwBusy ? "…" : "Demander un retrait"}
+              </button>
+            </div>
+          )}
+          {vWithdrawals.length > 0 && (
+            <>
+              <button onClick={() => setShowVWithdrawals((s) => !s)} className="f-mono text-[10px] text-[#14213D]/40 hover:text-[#14213D] underline">
+                {showVWithdrawals ? "Masquer l'historique" : "Voir l'historique des retraits"}
+              </button>
+              {showVWithdrawals && (
+                <div className="mt-2 space-y-1.5">
+                  {vWithdrawals.map((w) => (
+                    <div key={w.id} className="flex items-center justify-between border-b border-dashed border-[#14213D]/10 pb-1.5">
+                      <p className="f-body text-xs text-[#14213D]">{Math.round(w.amount).toLocaleString("fr-FR")} F · {w.method === "bank" ? "Banque" : "Mobile Money"}</p>
+                      <span className={`f-mono text-[9px] px-2 py-0.5 rounded-full ${w.status === "done" ? "bg-[#2D6A4F]/10 text-[#2D6A4F]" : "bg-[#14213D]/10 text-[#14213D]/60"}`}>{w.status === "done" ? "✓ Reçu" : "En attente"}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
 
       <div className="flex gap-2 mb-6">
         <button onClick={() => setShowStats((s) => !s)} className="flex-1 f-mono text-xs bg-[#14213D]/5 text-[#14213D] py-2 rounded-full">
@@ -2920,7 +3011,10 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
             {withdrawals.map((w) => (
               <div key={w.id} className="flex items-center justify-between border-b border-dashed border-[#14213D]/10 pb-1.5">
                 <div>
-                  <p className="f-body text-xs text-[#14213D]">{Math.round(w.amount).toLocaleString("fr-FR")} F · {w.method === "bank" ? "Banque" : "Mobile Money"}</p>
+                  <p className="f-body text-xs text-[#14213D]">
+                    {Math.round(w.amount).toLocaleString("fr-FR")} F · {w.method === "bank" ? "Banque" : "Mobile Money"}
+                    {w.vendorPhone && <span className="f-mono text-[9px] bg-[#2D6A4F]/10 text-[#2D6A4F] px-1.5 py-0.5 rounded ml-1.5">Vendeur · {w.vendorPhone}</span>}
+                  </p>
                   <p className="f-mono text-[9px] text-[#14213D]/40">{w.accountInfo} · {new Date(w.createdAt).toLocaleDateString("fr-FR")}</p>
                 </div>
                 {w.status === "done" ? (
