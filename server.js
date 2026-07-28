@@ -1180,6 +1180,63 @@ app.delete("/api/owner-notes/:id", requireOwner, async (req, res) => {
   res.json({ ok: true });
 });
 
+// Résumé des revenus du propriétaire — distingue la commission "générée"
+// (théorique, calculée sur toutes les commandes livrées) de l'argent
+// "réellement encaissé" (paiements CinetPay confirmés : abonnements, recharges
+// de portefeuille vendeur, et part commission des commandes payées en ligne).
+app.get("/api/admin/revenue", requireOwner, async (req, res) => {
+  const { rows: delivered } = await pool.query("SELECT commission FROM orders WHERE status = 'livree'");
+  const commissionGenerated = delivered.reduce((s, o) => s + Number(o.commission || 0), 0);
+
+  const { rows: confirmedPending } = await pool.query(
+    "SELECT kind, amount FROM pending_payments WHERE status = 'confirmed' AND kind IN ('subscription', 'wallet_topup')"
+  );
+  const fromSubscriptionsAndTopups = confirmedPending.reduce((s, p) => s + Number(p.amount || 0), 0);
+
+  const { rows: paidOrders } = await pool.query("SELECT commission FROM orders WHERE paid = true AND status != 'annulee'");
+  const fromOnlineOrderCommissions = paidOrders.reduce((s, o) => s + Number(o.commission || 0), 0);
+
+  const realCollected = fromSubscriptionsAndTopups + fromOnlineOrderCommissions;
+
+  const { rows: withdrawn } = await pool.query("SELECT amount FROM withdrawal_requests WHERE status = 'done'");
+  const alreadyWithdrawn = withdrawn.reduce((s, w) => s + Number(w.amount || 0), 0);
+  const { rows: pendingW } = await pool.query("SELECT amount FROM withdrawal_requests WHERE status = 'pending'");
+  const pendingWithdrawal = pendingW.reduce((s, w) => s + Number(w.amount || 0), 0);
+
+  res.json({
+    commissionGenerated,
+    realCollected,
+    availableToWithdraw: Math.max(0, realCollected - alreadyWithdrawn - pendingWithdrawal),
+    alreadyWithdrawn,
+    pendingWithdrawal,
+  });
+});
+
+app.get("/api/admin/withdrawals", requireOwner, async (req, res) => {
+  const { rows } = await pool.query("SELECT * FROM withdrawal_requests ORDER BY created_at DESC");
+  res.json(rows.map((r) => ({ id: r.id, amount: Number(r.amount), method: r.method, accountInfo: r.account_info, status: r.status, createdAt: Number(r.created_at), doneAt: r.done_at ? Number(r.done_at) : null })));
+});
+app.post("/api/admin/withdrawals", requireOwner, async (req, res) => {
+  const { amount, method, accountInfo } = req.body;
+  if (!amount || amount <= 0) return res.status(400).json({ error: "Indique un montant valide." });
+  if (!["bank", "mobile_money"].includes(method)) return res.status(400).json({ error: "Méthode invalide." });
+  if (!accountInfo) return res.status(400).json({ error: "Indique les coordonnées du compte de réception." });
+  const id = uid();
+  await pool.query(
+    "INSERT INTO withdrawal_requests (id, amount, method, account_info, status, created_at) VALUES ($1,$2,$3,$4,'pending',$5)",
+    [id, amount, method, accountInfo, Date.now()]
+  );
+  logAdminAction("Demande de retrait créée", null, `${amount} F · ${method}`);
+  res.json({ ok: true, id });
+});
+app.post("/api/admin/withdrawals/:id/done", requireOwner, async (req, res) => {
+  await pool.query("UPDATE withdrawal_requests SET status = 'done', done_at = $1 WHERE id = $2", [Date.now(), req.params.id]);
+  logAdminAction("Retrait marqué comme effectué", req.params.id);
+  res.json({ ok: true });
+});
+
+// Commandes payées puis annulées : leur remboursement doit être traité
+// manuellement (CinetPay ne propose pas de remboursement automatique par API).
 app.get("/api/refunds", requireOwner, async (req, res) => {
   const { rows } = await pool.query("SELECT * FROM orders WHERE refund_status != 'none' ORDER BY created_at DESC");
   res.json(rows.map(mapOrder));
