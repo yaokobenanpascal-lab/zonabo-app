@@ -1310,6 +1310,13 @@ app.post("/api/cinetpay/notify", async (req, res) => {
           "UPDATE profiles SET subscription_status = 'active', subscription_expires_at = $1 WHERE role = $2 AND phone = $3",
           [expiresAt, pending.role, pending.phone]
         );
+      } else if (pending.kind === "wallet_topup" && pending.phone) {
+        // Le vendeur recharge lui-même son portefeuille de commission (Mobile
+        // Money / carte via CinetPay) — l'argent arrive directement sur le
+        // compte CinetPay du propriétaire de la plateforme, comme tous les
+        // autres paiements du site.
+        await pool.query("UPDATE profiles SET wallet_balance = wallet_balance + $1 WHERE role = 'vendor' AND phone = $2", [Number(pending.amount) || 0, pending.phone]);
+        logAdminAction("Portefeuille rechargé par le vendeur", pending.phone, `+${pending.amount} F`);
       }
       await pool.query("UPDATE pending_payments SET status = 'confirmed' WHERE transaction_id = $1", [transactionId]);
     } else {
