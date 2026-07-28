@@ -274,3 +274,12 @@ CREATE TABLE IF NOT EXISTS withdrawal_requests (
   done_at BIGINT,
   vendor_phone TEXT -- NULL = retrait du propriétaire ; rempli = retrait de ce vendeur
 );
+
+-- Vidéo de présentation d'un produit/boutique (marketing) — nécessite Cloudinary
+-- configuré côté vendeur (les vidéos ne peuvent pas être stockées en base64
+-- comme les photos, bien trop volumineuses).
+ALTER TABLE products ADD COLUMN IF NOT EXISTS video_url TEXT;
+
+-- Jusqu'à 5 vidéos par produit (même principe que les 5 photos) —
+-- video_url reste la première/vidéo de couverture.
+ALTER TABLE products ADD COLUMN IF NOT EXISTS video_urls JSONB DEFAULT '[]';
