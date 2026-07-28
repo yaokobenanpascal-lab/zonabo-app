@@ -1214,7 +1214,7 @@ app.get("/api/admin/revenue", requireOwner, async (req, res) => {
 
 app.get("/api/admin/withdrawals", requireOwner, async (req, res) => {
   const { rows } = await pool.query("SELECT * FROM withdrawal_requests ORDER BY created_at DESC");
-  res.json(rows.map((r) => ({ id: r.id, amount: Number(r.amount), method: r.method, accountInfo: r.account_info, status: r.status, createdAt: Number(r.created_at), doneAt: r.done_at ? Number(r.done_at) : null })));
+  res.json(rows.map((r) => ({ id: r.id, amount: Number(r.amount), method: r.method, accountInfo: r.account_info, status: r.status, createdAt: Number(r.created_at), doneAt: r.done_at ? Number(r.done_at) : null, vendorPhone: r.vendor_phone || null })));
 });
 app.post("/api/admin/withdrawals", requireOwner, async (req, res) => {
   const { amount, method, accountInfo } = req.body;
@@ -1233,6 +1233,56 @@ app.post("/api/admin/withdrawals/:id/done", requireOwner, async (req, res) => {
   await pool.query("UPDATE withdrawal_requests SET status = 'done', done_at = $1 WHERE id = $2", [Date.now(), req.params.id]);
   logAdminAction("Retrait marqué comme effectué", req.params.id);
   res.json({ ok: true });
+});
+
+// ==================== SÉQUESTRE VENDEUR (paiement en ligne retenu jusqu'à livraison) ====================
+// Pour les commandes payées en ligne, l'argent arrive d'abord chez le
+// propriétaire (un seul compte CinetPay pour toute la plateforme). La part du
+// vendeur (prix - commission) reste "en attente" tant que la commande n'est
+// pas livrée/confirmée par l'acheteur — ensuite seulement, elle devient
+// disponible pour un retrait vers son Mobile Money/banque.
+app.get("/api/vendors/:phone/revenue", requirePhone((req) => req.params.phone), async (req, res) => {
+  const { rows } = await pool.query("SELECT items, commission, status, paid FROM orders WHERE paid = true");
+  let pending = 0;
+  let available = 0;
+  for (const o of rows) {
+    const items = o.items || [];
+    const totalGoods = items.reduce((s, it) => s + Number(it.price) * Number(it.qty), 0);
+    const mine = items.filter((it) => it.vendorPhone === req.params.phone).reduce((s, it) => s + Number(it.price) * Number(it.qty), 0);
+    if (mine <= 0 || totalGoods <= 0) continue;
+    const share = mine / totalGoods;
+    const net = mine - Number(o.commission) * share;
+    if (o.status === "livree") available += net;
+    else if (o.status !== "annulee") pending += net;
+  }
+  const { rows: withdrawn } = await pool.query("SELECT amount FROM withdrawal_requests WHERE vendor_phone = $1 AND status = 'done'", [req.params.phone]);
+  const alreadyWithdrawn = withdrawn.reduce((s, w) => s + Number(w.amount || 0), 0);
+  const { rows: pendingW } = await pool.query("SELECT amount FROM withdrawal_requests WHERE vendor_phone = $1 AND status = 'pending'", [req.params.phone]);
+  const pendingWithdrawal = pendingW.reduce((s, w) => s + Number(w.amount || 0), 0);
+  res.json({
+    pendingProceeds: pending,
+    availableProceeds: available,
+    alreadyWithdrawn,
+    pendingWithdrawal,
+    availableToWithdraw: Math.max(0, available - alreadyWithdrawn - pendingWithdrawal),
+  });
+});
+app.get("/api/vendors/:phone/withdrawals", requirePhone((req) => req.params.phone), async (req, res) => {
+  const { rows } = await pool.query("SELECT * FROM withdrawal_requests WHERE vendor_phone = $1 ORDER BY created_at DESC", [req.params.phone]);
+  res.json(rows.map((r) => ({ id: r.id, amount: Number(r.amount), method: r.method, accountInfo: r.account_info, status: r.status, createdAt: Number(r.created_at), doneAt: r.done_at ? Number(r.done_at) : null })));
+});
+app.post("/api/vendors/:phone/withdrawals", requirePhone((req) => req.params.phone), async (req, res) => {
+  const { amount, method, accountInfo } = req.body;
+  if (!amount || amount <= 0) return res.status(400).json({ error: "Indique un montant valide." });
+  if (!["bank", "mobile_money"].includes(method)) return res.status(400).json({ error: "Méthode invalide." });
+  if (!accountInfo) return res.status(400).json({ error: "Indique les coordonnées du compte de réception." });
+  const id = uid();
+  await pool.query(
+    "INSERT INTO withdrawal_requests (id, amount, method, account_info, status, created_at, vendor_phone) VALUES ($1,$2,$3,$4,'pending',$5,$6)",
+    [id, amount, method, accountInfo, Date.now(), req.params.phone]
+  );
+  logAdminAction("Demande de retrait vendeur créée", req.params.phone, `${amount} F · ${method}`);
+  res.json({ ok: true, id });
 });
 
 // Commandes payées puis annulées : leur remboursement doit être traité
