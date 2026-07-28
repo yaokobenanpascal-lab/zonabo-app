@@ -75,8 +75,8 @@ const CINETPAY_CONFIG = {
 //    → Signing mode: "Unsigned" → note son nom
 // 4. Remplace les deux valeurs ci-dessous
 const CLOUDINARY_CONFIG = {
-  cloudName: "REMPLACE_PAR_TON_CLOUD_NAME",
-  uploadPreset: "REMPLACE_PAR_TON_UPLOAD_PRESET",
+  cloudName: "kylr0amb",
+  uploadPreset: "zonako_uploads",
 };
 async function uploadImageToCloudinary(file) {
   if (CLOUDINARY_CONFIG.cloudName.startsWith("REMPLACE")) {
@@ -87,6 +87,24 @@ async function uploadImageToCloudinary(file) {
   form.append("upload_preset", CLOUDINARY_CONFIG.uploadPreset);
   const r = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CONFIG.cloudName}/image/upload`, { method: "POST", body: form });
   if (!r.ok) throw new Error("Échec de l'envoi de l'image.");
+  const data = await r.json();
+  return data.secure_url;
+}
+// Les vidéos ne peuvent pas être stockées en base64 comme les photos (bien
+// trop volumineuses pour la base de données) — Cloudinary est obligatoire ici,
+// pas de repli possible.
+async function uploadVideoToCloudinary(file) {
+  if (CLOUDINARY_CONFIG.cloudName.startsWith("REMPLACE")) {
+    throw new Error("L'ajout de vidéo nécessite Cloudinary configuré par le propriétaire de la plateforme (voir CLOUDINARY_CONFIG).");
+  }
+  if (file.size > 50 * 1024 * 1024) {
+    throw new Error("Vidéo trop lourde (50 Mo maximum). Essaie une vidéo plus courte.");
+  }
+  const form = new FormData();
+  form.append("file", file);
+  form.append("upload_preset", CLOUDINARY_CONFIG.uploadPreset);
+  const r = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CONFIG.cloudName}/video/upload`, { method: "POST", body: form });
+  if (!r.ok) throw new Error("Échec de l'envoi de la vidéo.");
   const data = await r.json();
   return data.secure_url;
 }
@@ -473,22 +491,32 @@ const VEHICLE_LABELS = { moto: "🏍️ Moto", velo: "🚲 Vélo", voiture: "�
 function ProductGalleryModal({ product, onClose }) {
   const [index, setIndex] = useState(0);
   const photos = product.imageUrls && product.imageUrls.length ? product.imageUrls : (product.imageUrl ? [product.imageUrl] : []);
-  if (photos.length === 0) return null;
+  // La vidéo passe en premier (plus convaincante), suivie des photos.
+  const slides = [
+    ...(product.videoUrl ? [{ type: "video", url: product.videoUrl }] : []),
+    ...photos.map((url) => ({ type: "image", url })),
+  ];
+  if (slides.length === 0) return null;
+  const current = slides[index];
   return (
     <div className="fixed inset-0 bg-black/85 z-50 flex flex-col items-center justify-center p-4" onClick={onClose}>
       <button onClick={onClose} className="absolute top-4 right-4 text-white f-mono text-xs bg-white/10 px-3 py-1.5 rounded-full">Fermer ✕</button>
       <div className="relative max-w-lg w-full" onClick={(e) => e.stopPropagation()}>
-        <img src={photos[index]} alt={product.name} className="w-full max-h-[70vh] object-contain rounded-xl" />
-        {photos.length > 1 && (
+        {current.type === "video" ? (
+          <video src={current.url} controls autoPlay className="w-full max-h-[70vh] rounded-xl bg-black" />
+        ) : (
+          <img src={current.url} alt={product.name} className="w-full max-h-[70vh] object-contain rounded-xl" />
+        )}
+        {slides.length > 1 && (
           <>
-            <button onClick={() => setIndex((i) => (i - 1 + photos.length) % photos.length)} className="absolute left-2 top-1/2 -translate-y-1/2 bg-white/20 text-white w-9 h-9 rounded-full">‹</button>
-            <button onClick={() => setIndex((i) => (i + 1) % photos.length)} className="absolute right-2 top-1/2 -translate-y-1/2 bg-white/20 text-white w-9 h-9 rounded-full">›</button>
+            <button onClick={() => setIndex((i) => (i - 1 + slides.length) % slides.length)} className="absolute left-2 top-1/2 -translate-y-1/2 bg-white/20 text-white w-9 h-9 rounded-full">‹</button>
+            <button onClick={() => setIndex((i) => (i + 1) % slides.length)} className="absolute right-2 top-1/2 -translate-y-1/2 bg-white/20 text-white w-9 h-9 rounded-full">›</button>
           </>
         )}
       </div>
-      {photos.length > 1 && (
+      {slides.length > 1 && (
         <div className="flex gap-1.5 mt-3">
-          {photos.map((_, i) => (
+          {slides.map((s, i) => (
             <button key={i} onClick={(e) => { e.stopPropagation(); setIndex(i); }} className={`w-2 h-2 rounded-full ${i === index ? "bg-white" : "bg-white/30"}`} />
           ))}
         </div>
@@ -1433,12 +1461,15 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
               const cat = CATEGORIES.find((c) => c.name === p.category);
               return (
                 <div key={p.id} className="ticket bg-white border-2 border-[#14213D]/10 overflow-hidden flex flex-col">
-                  <div className="h-28 flex items-center justify-center text-4xl bg-[#FBF7F0] overflow-hidden relative cursor-pointer" onClick={() => p.imageUrl && setGalleryProduct(p)}>
+                  <div className="h-28 flex items-center justify-center text-4xl bg-[#FBF7F0] overflow-hidden relative cursor-pointer" onClick={() => (p.imageUrl || p.videoUrl) && setGalleryProduct(p)}>
                     {p.imageUrl ? (
                       <img src={p.imageUrl} alt={p.name} className="w-full h-full object-cover" onError={(e) => { e.target.style.display = "none"; e.target.parentElement.textContent = cat?.emoji || "📦"; }} />
                     ) : (cat?.emoji || "📦")}
                     {p.imageUrls && p.imageUrls.length > 1 && (
                       <span className="absolute bottom-1.5 right-1.5 f-mono text-[9px] bg-black/60 text-white px-1.5 py-0.5 rounded-full">📷 {p.imageUrls.length}</span>
+                    )}
+                    {p.videoUrl && (
+                      <span className="absolute bottom-1.5 left-1.5 f-mono text-[9px] bg-black/60 text-white px-1.5 py-0.5 rounded-full">🎥 Vidéo</span>
                     )}
                   </div>
                   <div className="p-4 border-t-2 border-dashed border-[#14213D]/15 flex-1 flex flex-col">
@@ -1754,7 +1785,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
 
 function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addProduct, updateProduct, deleteProduct, orders, confirmOrder, cancelOrder, shipOrder, updateStatus, setRole, trialDays, accessFee, onPhoneChanged, proposeTransport, confirmTransport, tip }) {
   const [shipForm, setShipForm] = useState({}); // { [orderId]: { company, tracking } }
-  const [form, setForm] = useState({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrls: [], deliveryTime: "", description: "", vendorLandmark: vendorInfo.landmark || "" });
+  const [form, setForm] = useState({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrls: [], videoUrl: "", deliveryTime: "", description: "", vendorLandmark: vendorInfo.landmark || "" });
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [editingProfile, setEditingProfile] = useState(false);
@@ -1763,6 +1794,9 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
   const [publishError, setPublishError] = useState("");
   const [uploadingImg, setUploadingImg] = useState(false);
   const [uploadingEditImg, setUploadingEditImg] = useState(false);
+  const [uploadingVideo, setUploadingVideo] = useState(false);
+  const [uploadingEditVideo, setUploadingEditVideo] = useState(false);
+  const [videoError, setVideoError] = useState("");
   const [landmarkDraft, setLandmarkDraft] = useState(vendorInfo.landmark || "");
   const [savingLandmark, setSavingLandmark] = useState(false);
   const [showStats, setShowStats] = useState(false);
@@ -1835,10 +1869,10 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
 
   function startEdit(p) {
     setEditingId(p.id);
-    setEditForm({ price: p.price, stock: p.stock, deliveryTime: p.deliveryTime || "", imageUrls: p.imageUrls || (p.imageUrl ? [p.imageUrl] : []), description: p.description || "", vendorLandmark: p.vendorLandmark || "" });
+    setEditForm({ price: p.price, stock: p.stock, deliveryTime: p.deliveryTime || "", imageUrls: p.imageUrls || (p.imageUrl ? [p.imageUrl] : []), videoUrl: p.videoUrl || "", description: p.description || "", vendorLandmark: p.vendorLandmark || "" });
   }
   function saveEdit(id) {
-    updateProduct(id, { price: Number(editForm.price), stock: Number(editForm.stock), deliveryTime: editForm.deliveryTime || "Non précisé", imageUrls: editForm.imageUrls || [], description: editForm.description || "", vendorLandmark: editForm.vendorLandmark || "" });
+    updateProduct(id, { price: Number(editForm.price), stock: Number(editForm.stock), deliveryTime: editForm.deliveryTime || "Non précisé", imageUrls: editForm.imageUrls || [], videoUrl: editForm.videoUrl || "", description: editForm.description || "", vendorLandmark: editForm.vendorLandmark || "" });
     setEditingId(null);
   }
   async function handleImageUpload(file, target) {
@@ -1865,6 +1899,23 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
   function removeImage(target, index) {
     if (target === "new") setForm((f) => ({ ...f, imageUrls: f.imageUrls.filter((_, i) => i !== index) }));
     else setEditForm((f) => ({ ...f, imageUrls: (f.imageUrls || []).filter((_, i) => i !== index) }));
+  }
+  async function handleVideoUpload(file, target) {
+    if (!file) return;
+    setVideoError("");
+    if (target === "new") setUploadingVideo(true); else setUploadingEditVideo(true);
+    try {
+      const url = await uploadVideoToCloudinary(file);
+      if (target === "new") setForm((f) => ({ ...f, videoUrl: url }));
+      else setEditForm((f) => ({ ...f, videoUrl: url }));
+    } catch (e) {
+      setVideoError(e.message || "Impossible d'envoyer la vidéo.");
+    }
+    if (target === "new") setUploadingVideo(false); else setUploadingEditVideo(false);
+  }
+  function removeVideo(target) {
+    if (target === "new") setForm((f) => ({ ...f, videoUrl: "" }));
+    else setEditForm((f) => ({ ...f, videoUrl: "" }));
   }
   function saveProfile() {
     registerVendor(profileForm);
@@ -2098,6 +2149,23 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
               <p className="f-body text-[10px] text-[#14213D]/35 mt-1">Jusqu'à 5 photos — la première sert de couverture. Montre différents angles pour rassurer les acheteurs.</p>
             </div>
 
+            <div>
+              <label className="f-mono text-[10px] uppercase text-[#14213D]/40 block mb-1">Vidéo de présentation (optionnel)</label>
+              {form.videoUrl ? (
+                <div className="relative inline-block">
+                  <video src={form.videoUrl} controls className="w-40 h-28 rounded-lg object-cover border-2 border-[#14213D]/10" />
+                  <button onClick={() => removeVideo("new")} className="absolute -top-1.5 -right-1.5 bg-white rounded-full border border-[#14213D]/10"><X size={12} className="text-[#C1440E]" /></button>
+                </div>
+              ) : (
+                <label className="f-mono text-xs text-center bg-[#14213D]/5 hover:bg-[#14213D]/10 text-[#14213D]/60 py-2 rounded-lg cursor-pointer block">
+                  {uploadingVideo ? "Envoi…" : "🎥 Ajouter une vidéo (boutique, article, démo)"}
+                  <input type="file" accept="video/*" className="hidden" onChange={(e) => handleVideoUpload(e.target.files[0], "new")} />
+                </label>
+              )}
+              {videoError && <p className="f-body text-[10px] text-[#C1440E] mt-1">{videoError}</p>}
+              <p className="f-body text-[10px] text-[#14213D]/35 mt-1">Une courte vidéo (magasin, article en main, démonstration) aide beaucoup à convaincre — 50 Mo maximum.</p>
+            </div>
+
             <textarea placeholder="Détails sur l'article (matière, taille, état, ce qui le rend spécial...)" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} rows={3} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#2D6A4F]" />
             <input placeholder="Prix (FCFA)" type="number" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#2D6A4F]" />
             <input placeholder="Stock disponible" type="number" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#2D6A4F]" />
@@ -2121,7 +2189,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                 setPublishError("");
                 try {
                   await addProduct({ ...form, price: Number(form.price), stock: Number(form.stock) || 0, deliveryTime: form.deliveryTime || "Non précisé", vendorName: vendorInfo.name, vendorPhone: vendorInfo.phone });
-                  setForm({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrls: [], deliveryTime: "", description: "", vendorLandmark: vendorInfo.landmark || "" });
+                  setForm({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrls: [], videoUrl: "", deliveryTime: "", description: "", vendorLandmark: vendorInfo.landmark || "" });
                 } catch (e) {
                   setPublishError(e.message || "Impossible de publier le produit. Réessaie.");
                 }
@@ -2171,6 +2239,20 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                           <input type="file" accept="image/*" className="hidden" onChange={(e) => handleImageUpload(e.target.files[0], "edit")} />
                         </label>
                       )}
+                    </div>
+                    <div>
+                      {editForm.videoUrl ? (
+                        <div className="relative inline-block">
+                          <video src={editForm.videoUrl} controls className="w-32 h-24 rounded-lg object-cover border-2 border-[#14213D]/10" />
+                          <button onClick={() => removeVideo("edit")} className="absolute -top-1.5 -right-1.5 bg-white rounded-full border border-[#14213D]/10"><X size={10} className="text-[#C1440E]" /></button>
+                        </div>
+                      ) : (
+                        <label className="f-mono text-[10px] text-center bg-[#14213D]/5 text-[#14213D]/60 py-1.5 rounded-lg cursor-pointer block">
+                          {uploadingEditVideo ? "Envoi…" : "🎥 Ajouter une vidéo"}
+                          <input type="file" accept="video/*" className="hidden" onChange={(e) => handleVideoUpload(e.target.files[0], "edit")} />
+                        </label>
+                      )}
+                      {videoError && <p className="f-body text-[10px] text-[#C1440E] mt-1">{videoError}</p>}
                     </div>
                     <div className="flex gap-2">
                       <button onClick={() => saveEdit(p.id)} className="flex-1 f-mono text-xs bg-[#2D6A4F] text-white py-1.5 rounded-full">Enregistrer</button>
