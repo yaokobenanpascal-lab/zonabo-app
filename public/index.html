@@ -1656,6 +1656,9 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
               <>
                 <div className="mt-5 pt-4 border-t-2 border-dashed border-[#14213D]/15 space-y-3">
                   <p className="f-body text-xs text-[#14213D]/50">Commande au nom de <span className="font-semibold text-[#14213D]">{buyerInfo.name}</span> · {buyerInfo.phone}</p>
+                  <div className="bg-[#F2A93B]/10 border-2 border-[#F2A93B]/30 rounded-lg px-3 py-2">
+                    <p className="f-body text-[11px] text-[#14213D]">⚠️ Les frais de livraison/expédition sont <span className="font-semibold">à ta charge</span>, en plus du prix des articles ci-dessous — ils seront précisés une fois le livreur ou la compagnie de transport connu(e).</p>
+                  </div>
                   <div>
                     <label className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 block mb-1.5">Mode d'expédition</label>
                     <div className="grid grid-cols-1 gap-2">
