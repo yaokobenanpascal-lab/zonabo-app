@@ -1014,7 +1014,7 @@ app.post("/api/vendors/:phone/unsuspend", requireOwner, async (req, res) => {
 // qu'il a lui-même passée et une fois qu'elle est livrée.
 app.post("/api/ratings", async (req, res) => {
   const tokenPhone = await getTokenPhone(req);
-  const { orderId, rateePhone, rateeRole, stars, comment } = req.body;
+  const { orderId, rateePhone, rateeRole, stars, comment, photoUrl } = req.body;
   if (!tokenPhone) return res.status(401).json({ error: "Numéro non vérifié." });
   if (!orderId || !rateePhone || !rateeRole || !stars) return res.status(400).json({ error: "Informations manquantes." });
   const { rows } = await pool.query("SELECT buyer_phone, status FROM orders WHERE id = $1", [orderId]);
@@ -1023,22 +1023,81 @@ app.post("/api/ratings", async (req, res) => {
   if (rows[0].status !== "livree") return res.status(400).json({ error: "Tu ne peux noter qu'une commande livrée." });
   const id = uid();
   await pool.query(
-    `INSERT INTO ratings (id, order_id, buyer_phone, ratee_phone, ratee_role, stars, comment, created_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-     ON CONFLICT (order_id, ratee_phone) DO UPDATE SET stars = $6, comment = $7`,
-    [id, orderId, tokenPhone, rateePhone, rateeRole, Math.max(1, Math.min(5, Number(stars))), comment || "", Date.now()]
+    `INSERT INTO ratings (id, order_id, buyer_phone, ratee_phone, ratee_role, stars, comment, created_at, photo_url)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+     ON CONFLICT (order_id, ratee_phone) DO UPDATE SET stars = $6, comment = $7, photo_url = $9`,
+    [id, orderId, tokenPhone, rateePhone, rateeRole, Math.max(1, Math.min(5, Number(stars))), comment || "", Date.now(), photoUrl || null]
   );
   res.json({ ok: true });
 });
 
-// Moyenne + nombre de notes pour un vendeur ou un livreur — public (visible par
-// les acheteurs avant de choisir), pas besoin d'être connecté.
+// Photos jointes par de vrais acheteurs (preuve de conformité) — publiques,
+// affichées aux futurs acheteurs à côté des photos officielles du vendeur.
+app.get("/api/ratings/:phone/photos", async (req, res) => {
+  const { rows } = await pool.query(
+    "SELECT photo_url, comment, stars, created_at FROM ratings WHERE ratee_phone = $1 AND photo_url IS NOT NULL ORDER BY created_at DESC LIMIT 12",
+    [req.params.phone]
+  );
+  res.json(rows.map((r) => ({ photoUrl: r.photo_url, comment: r.comment, stars: r.stars, createdAt: Number(r.created_at) })));
+});
+
 app.get("/api/ratings/:phone", async (req, res) => {
   const { rows } = await pool.query(
     "SELECT COUNT(*)::int AS count, COALESCE(AVG(stars), 0) AS avg FROM ratings WHERE ratee_phone = $1",
     [req.params.phone]
   );
   res.json({ count: rows[0].count, average: Math.round(Number(rows[0].avg) * 10) / 10 });
+});
+
+// ==================== LITIGES DE NON-CONFORMITÉ ====================
+// L'acheteur peut refuser de confirmer une réception s'il estime que
+// l'article ne correspond pas aux photos/vidéos annoncées — ça bloque le
+// déblocage des fonds du vendeur jusqu'à ce que le propriétaire tranche.
+app.post("/api/orders/:id/dispute", requirePhone((req) => req.body.phone), async (req, res) => {
+  const { rows } = await pool.query("SELECT buyer_phone, items, status FROM orders WHERE id = $1", [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: "Commande introuvable." });
+  if (req.body.phone !== rows[0].buyer_phone) return res.status(403).json({ error: "Ce n'est pas ta commande." });
+  if (!["en_transit", "en_livraison", "confirmee"].includes(rows[0].status)) {
+    return res.status(400).json({ error: "Cette commande n'est pas dans un état pouvant être contestée." });
+  }
+  const vendorPhone = (rows[0].items || []).map((it) => it.vendorPhone).find(Boolean) || null;
+  const id = uid();
+  await pool.query(
+    "INSERT INTO order_disputes (id, order_id, buyer_phone, vendor_phone, description, photo_url, status, created_at) VALUES ($1,$2,$3,$4,$5,$6,'open',$7)",
+    [id, req.params.id, req.body.phone, vendorPhone, req.body.description || "", req.body.photoUrl || null, Date.now()]
+  );
+  await pool.query("UPDATE orders SET status = 'litige' WHERE id = $1", [req.params.id]);
+  logAdminAction("Litige ouvert par l'acheteur", vendorPhone, `Commande #${req.params.id.slice(-6)}`);
+  const { rows: r2 } = await pool.query("SELECT * FROM orders WHERE id = $1", [req.params.id]);
+  res.json(mapOrder(r2[0]));
+});
+app.get("/api/admin/disputes", requireOwner, async (req, res) => {
+  const { rows } = await pool.query("SELECT * FROM order_disputes ORDER BY (status = 'open') DESC, created_at DESC");
+  res.json(rows.map((r) => ({
+    id: r.id, orderId: r.order_id, buyerPhone: r.buyer_phone, vendorPhone: r.vendor_phone,
+    description: r.description, photoUrl: r.photo_url, status: r.status,
+    createdAt: Number(r.created_at), resolvedAt: r.resolved_at ? Number(r.resolved_at) : null,
+  })));
+});
+app.post("/api/admin/disputes/:id/resolve", requireOwner, async (req, res) => {
+  const { resolution } = req.body; // 'buyer' ou 'vendor'
+  if (!["buyer", "vendor"].includes(resolution)) return res.status(400).json({ error: "Résolution invalide." });
+  const { rows } = await pool.query("SELECT * FROM order_disputes WHERE id = $1", [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: "Litige introuvable." });
+  const dispute = rows[0];
+  if (resolution === "vendor") {
+    // Le vendeur avait raison : la commande est marquée livrée normalement,
+    // ce qui libère ses fonds (séquestre) et déduit sa commission comme d'habitude.
+    await pool.query("UPDATE orders SET status = 'livree' WHERE id = $1", [dispute.order_id]);
+    await settleVendorCommission(dispute.order_id);
+  } else {
+    // L'acheteur avait raison : la commande est annulée, marquée à rembourser —
+    // les fonds du vendeur restent bloqués (jamais libérés pour cette commande).
+    await pool.query("UPDATE orders SET status = 'annulee', refund_status = CASE WHEN paid THEN 'pending' ELSE refund_status END WHERE id = $1", [dispute.order_id]);
+  }
+  await pool.query("UPDATE order_disputes SET status = $1, resolved_at = $2 WHERE id = $3", [`resolved_${resolution}`, Date.now(), req.params.id]);
+  logAdminAction("Litige tranché", dispute.vendor_phone, resolution === "buyer" ? "En faveur de l'acheteur" : "En faveur du vendeur");
+  res.json({ ok: true });
 });
 
 // ==================== VÉRIFICATION DES LIVREURS ====================
