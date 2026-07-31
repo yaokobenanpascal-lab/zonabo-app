@@ -283,3 +283,25 @@ ALTER TABLE products ADD COLUMN IF NOT EXISTS video_url TEXT;
 -- Jusqu'à 5 vidéos par produit (même principe que les 5 photos) —
 -- video_url reste la première/vidéo de couverture.
 ALTER TABLE products ADD COLUMN IF NOT EXISTS video_urls JSONB DEFAULT '[]';
+
+-- Litige de non-conformité : l'acheteur peut refuser de confirmer une
+-- réception s'il estime que l'article reçu ne correspond pas aux
+-- photos/vidéos annoncées. Bloque le déblocage des fonds du vendeur (le
+-- statut de la commande ne passe pas à "livree") jusqu'à tranchage par le
+-- propriétaire.
+CREATE TABLE IF NOT EXISTS order_disputes (
+  id TEXT PRIMARY KEY,
+  order_id TEXT NOT NULL,
+  buyer_phone TEXT NOT NULL,
+  vendor_phone TEXT,
+  description TEXT,
+  photo_url TEXT,
+  status TEXT NOT NULL DEFAULT 'open', -- open | resolved_buyer | resolved_vendor
+  created_at BIGINT NOT NULL,
+  resolved_at BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_disputes_status ON order_disputes(status);
+
+-- Photo "reçue" jointe par l'acheteur à son avis — preuve visible par les
+-- futurs acheteurs, à côté des photos/vidéos du vendeur.
+ALTER TABLE ratings ADD COLUMN IF NOT EXISTS photo_url TEXT;
