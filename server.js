@@ -12,6 +12,14 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // CinetPay envoie sa notification en POST classique (formulaire), pas en JSON
 
+// Filet de sécurité global : une erreur non rattrapée dans une route ne doit
+// jamais faire planter tout le serveur (donc couper le site pour tout le
+// monde) — juste être journalisée. Node arrête le processus par défaut sur
+// une "unhandled rejection" depuis la version 15 ; on désactive ça ici.
+process.on("unhandledRejection", (err) => {
+  console.error("Erreur non rattrapée (le serveur continue de tourner) :", err);
+});
+
 const PORT = process.env.PORT || 3000;
 const OWNER_PASSCODE = process.env.OWNER_PASSCODE || "";
 if (!OWNER_PASSCODE) {
@@ -1515,9 +1523,21 @@ app.post("/api/owner/login", async (req, res) => {
   res.json({ token: await issueOwnerToken() });
 });
 
+// Filet de sécurité pour les routes API : si une erreur passe jusqu'ici (au
+// lieu d'un crash du serveur), on répond juste "Erreur serveur" proprement.
+app.use((err, req, res, next) => {
+  console.error("Erreur dans une route API :", err);
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: "Erreur serveur. Réessaie dans un instant." });
+});
+
 // ==================== Frontend statique ====================
 app.use(express.static(path.join(__dirname, "public")));
 app.get("*", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
-app.listen(PORT, () => console.log(`Zonako backend en écoute sur le port ${PORT}`));
-ensureSchema();
+// Le schéma DOIT être entièrement prêt avant d'accepter le moindre visiteur —
+// sinon une requête peut arriver pile pendant la mise à jour de la base et
+// planter sur une colonne "pas encore ajoutée" (ça nous est déjà arrivé).
+ensureSchema().then(() => {
+  app.listen(PORT, () => console.log(`Zonako backend en écoute sur le port ${PORT}`));
+});
