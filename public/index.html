@@ -43,6 +43,7 @@
     const Trash2 = makeIcon("🗑️");
     const Lock = makeIcon("🔒");
     const TrendingUp = makeIcon("📈");
+    const AlertTriangle = makeIcon("⚠️");
 
 
 const DEFAULT_FEE_RATE = 0.05; // 5% commission par défaut, prélevée sur chaque vente vendeur
@@ -490,12 +491,20 @@ const VEHICLE_LABELS = { moto: "🏍️ Moto", velo: "🚲 Vélo", voiture: "�
 // ou par points, pour montrer plusieurs angles d'un même article.
 function ProductGalleryModal({ product, onClose }) {
   const [index, setIndex] = useState(0);
+  const [buyerPhotos, setBuyerPhotos] = useState([]);
   const photos = product.imageUrls && product.imageUrls.length ? product.imageUrls : (product.imageUrl ? [product.imageUrl] : []);
   const videos = product.videoUrls && product.videoUrls.length ? product.videoUrls : (product.videoUrl ? [product.videoUrl] : []);
-  // Les vidéos passent en premier (plus convaincantes), suivies des photos.
+  useEffect(() => {
+    if (!product.vendorPhone) return;
+    apiGet(`/api/ratings/${encodeURIComponent(product.vendorPhone)}/photos`).then(setBuyerPhotos).catch(() => {});
+  }, [product.vendorPhone]);
+  // Les vidéos passent en premier (plus convaincantes), suivies des photos du
+  // vendeur, puis des vraies photos envoyées par d'anciens acheteurs (preuve
+  // de conformité — ce que les gens reçoivent vraiment).
   const slides = [
     ...videos.map((url) => ({ type: "video", url })),
     ...photos.map((url) => ({ type: "image", url })),
+    ...buyerPhotos.map((p) => ({ type: "buyer_image", url: p.photoUrl })),
   ];
   if (slides.length === 0) return null;
   const current = slides[index];
@@ -507,6 +516,9 @@ function ProductGalleryModal({ product, onClose }) {
           <video src={current.url} controls autoPlay className="w-full max-h-[70vh] rounded-xl bg-black" />
         ) : (
           <img src={current.url} alt={product.name} className="w-full max-h-[70vh] object-contain rounded-xl" />
+        )}
+        {current.type === "buyer_image" && (
+          <span className="absolute top-2 left-2 f-mono text-[10px] bg-[#2D6A4F] text-white px-2 py-1 rounded-full">✓ Photo d'un acheteur réel</span>
         )}
         {slides.length > 1 && (
           <>
@@ -612,6 +624,80 @@ function TransportNegotiationCard({ order, viewerRole, viewerPhone, onPropose, o
           {error && <p className="f-body text-xs text-[#C1440E] mt-1">{error}</p>}
         </>
       )}
+    </div>
+  );
+}
+
+// Confirmation de réception, avec option de contester si l'article ne
+// correspond pas à ce qui était annoncé (photo à l'appui) — bloque le
+// déblocage des fonds du vendeur jusqu'à tranchage par le propriétaire.
+function DisputeOrConfirm({ orderId, buyerPhone, confirmLabel, onConfirm, onDispute }) {
+  const [showForm, setShowForm] = useState(false);
+  const [description, setDescription] = useState("");
+  const [photoUrl, setPhotoUrl] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handlePhotoUpload(file) {
+    if (!file) return;
+    setUploading(true);
+    setError("");
+    try {
+      const url = await uploadImageToCloudinary(file);
+      setPhotoUrl(url);
+    } catch (e) {
+      setError(e.message || "Impossible d'envoyer la photo — le signalement peut aussi être envoyé sans photo.");
+    }
+    setUploading(false);
+  }
+  async function submitDispute() {
+    setBusy(true);
+    setError("");
+    try {
+      await onDispute(orderId, buyerPhone, description, photoUrl);
+    } catch (e) {
+      setError(e.message || "Erreur pendant le signalement.");
+    }
+    setBusy(false);
+  }
+  async function handleConfirm() {
+    setBusy(true);
+    setError("");
+    try {
+      await onConfirm(orderId);
+    } catch (e) {
+      setError(e.message || "Erreur pendant la confirmation.");
+    }
+    setBusy(false);
+  }
+
+  if (showForm) {
+    return (
+      <div className="mt-1.5 space-y-1.5">
+        <textarea placeholder="Décris le problème (taille, couleur, modèle différent de l'annonce...)" value={description} onChange={(e) => setDescription(e.target.value)} rows={2} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
+        {photoUrl ? (
+          <img src={photoUrl} alt="" className="w-20 h-20 rounded-lg object-cover border-2 border-[#14213D]/10" />
+        ) : (
+          <label className="f-mono text-[10px] text-center bg-[#14213D]/5 text-[#14213D]/60 py-1.5 rounded-lg cursor-pointer block">
+            {uploading ? "Envoi…" : "📷 Ajouter une photo de l'article reçu (recommandé)"}
+            <input type="file" accept="image/*" className="hidden" onChange={(e) => handlePhotoUpload(e.target.files[0])} />
+          </label>
+        )}
+        {error && <p className="f-body text-[10px] text-[#C1440E]">{error}</p>}
+        <div className="flex gap-2">
+          <button disabled={busy || !description.trim()} onClick={submitDispute} className="flex-1 f-mono text-xs bg-[#C1440E] disabled:opacity-40 text-white py-1.5 rounded-full">{busy ? "…" : "Envoyer le signalement"}</button>
+          <button onClick={() => setShowForm(false)} className="flex-1 f-mono text-xs bg-[#14213D]/10 text-[#14213D] py-1.5 rounded-full">Annuler</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-1.5 space-y-1.5">
+      <button disabled={busy} onClick={handleConfirm} className="w-full f-mono text-xs bg-[#2D6A4F] disabled:opacity-40 text-white py-1.5 rounded-full">{busy ? "…" : confirmLabel}</button>
+      <button onClick={() => setShowForm(true)} className="w-full f-mono text-[10px] text-[#C1440E]/70 hover:text-[#C1440E] underline">⚠️ Ce n'est pas conforme à ce qui était annoncé</button>
+      {error && <p className="f-body text-[10px] text-[#C1440E]">{error}</p>}
     </div>
   );
 }
@@ -778,6 +864,7 @@ function StatusBadge({ status }) {
     en_transit: { label: "En transit (transport)", bg: "#14213D", fg: "#FBF7F0", icon: Truck },
     livree: { label: "Livrée", bg: "#2D6A4F", fg: "#FBF7F0", icon: Check },
     annulee: { label: "Annulée", bg: "#C1440E", fg: "#FBF7F0", icon: X },
+    litige: { label: "En litige", bg: "#C1440E", fg: "#FBF7F0", icon: AlertTriangle },
   };
   const s = map[status] || map.nouvelle;
   const Icon = s.icon;
@@ -1242,7 +1329,7 @@ function ChangePhoneNumber({ role, info, accentColor, onChanged }) {
   );
 }
 
-function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, registerBuyer, logoutBuyer, placeOrder, cancelOrder, deleteMyOrder, showCart, setShowCart, myOrders, chooseCourierForOrder, confirmDeliveryByBuyer, proposeTransport, confirmTransport, tip }) {
+function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, registerBuyer, logoutBuyer, placeOrder, cancelOrder, deleteMyOrder, showCart, setShowCart, myOrders, chooseCourierForOrder, confirmDeliveryByBuyer, disputeOrder, proposeTransport, confirmTransport, tip }) {
   const [category, setCategory] = useState("");
   const [search, setSearch] = useState("");
   const [visibleCount, setVisibleCount] = useState(20);
@@ -1266,17 +1353,31 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
   const [ratedIds, setRatedIds] = useState([]);
   const [ratingDraft, setRatingDraft] = useState({}); // { [orderId_role]: stars }
   const [ratingSending, setRatingSending] = useState(false);
+  const [ratingPhotoAddedIds, setRatingPhotoAddedIds] = useState([]);
+  const [uploadingRatingPhoto, setUploadingRatingPhoto] = useState(null);
 
-  async function submitOrderRating(order, rateePhone, rateeRole, stars) {
+  async function submitOrderRating(order, rateePhone, rateeRole, stars, photoUrl) {
     setRatingSending(true);
     try {
-      await apiSend("/api/ratings", "POST", { orderId: order.id, rateePhone, rateeRole, stars }, getPhoneToken(buyerInfo.phone));
+      await apiSend("/api/ratings", "POST", { orderId: order.id, rateePhone, rateeRole, stars, photoUrl }, getPhoneToken(buyerInfo.phone));
       ratingsCache.delete(rateePhone); // pour que le nouveau score s'affiche ailleurs
       setRatedIds((ids) => [...ids, `${order.id}_${rateeRole}`]);
     } catch {
       // échec silencieux, le bouton reste cliquable pour réessayer
     }
     setRatingSending(false);
+  }
+  async function addRatingPhoto(order, rateePhone, stars, file, key) {
+    if (!file) return;
+    setUploadingRatingPhoto(key);
+    try {
+      const url = await uploadImageToCloudinary(file);
+      await submitOrderRating(order, rateePhone, "vendor", stars, url);
+      setRatingPhotoAddedIds((ids) => [...ids, key]);
+    } catch {
+      // échec silencieux — l'avis (sans photo) reste déjà enregistré
+    }
+    setUploadingRatingPhoto(null);
   }
 
   async function submitReport(orderId) {
@@ -1543,9 +1644,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                     <div className="mt-1">
                       <p className="f-mono text-[10px] text-[#14213D]/50">🚌 {o.transportCompany} · Suivi : {o.trackingNumber || "en attente du numéro"}</p>
                       <p className="f-body text-[11px] text-[#14213D]/40 mt-0.5">Récupère ton colis à l'agence {o.transportCompany} de {o.zone}, puis confirme ci-dessous.</p>
-                      <button onClick={() => confirmDeliveryByBuyer(o.id)} className="w-full f-mono text-xs bg-[#2D6A4F] text-white py-1.5 rounded-full mt-1.5">
-                        J'ai récupéré mon colis
-                      </button>
+                      <DisputeOrConfirm orderId={o.id} buyerPhone={buyerInfo.phone} confirmLabel="J'ai récupéré mon colis" onConfirm={confirmDeliveryByBuyer} onDispute={disputeOrder} />
                     </div>
                   )}
                   {o.status === "livree" && (
@@ -1560,9 +1659,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                   </p>
                   <CourierTrackingCard order={o} />
                   {o.status !== "livree" && !o.buyerConfirmed && (
-                    <button onClick={() => confirmDeliveryByBuyer(o.id)} className="w-full f-mono text-xs bg-[#2D6A4F] text-white py-1.5 rounded-full mt-1.5">
-                      J'ai reçu ma commande
-                    </button>
+                    <DisputeOrConfirm orderId={o.id} buyerPhone={buyerInfo.phone} confirmLabel="J'ai reçu ma commande" onConfirm={confirmDeliveryByBuyer} onDispute={disputeOrder} />
                   )}
                   {o.buyerConfirmed && (
                     <p className="f-mono text-[10px] text-[#2D6A4F] mt-1">
@@ -1607,7 +1704,8 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                     const key = `${o.id}_${t.role}`;
                     const already = ratedIds.includes(key);
                     return (
-                      <div key={t.role} className="flex items-center justify-between">
+                      <React.Fragment key={t.role}>
+                      <div className="flex items-center justify-between">
                         <span className="f-body text-[11px] text-[#14213D]/50">Noter {t.label}</span>
                         {already ? (
                           <span className="f-mono text-[10px] text-[#2D6A4F]">Merci ✓</span>
@@ -1619,6 +1717,13 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                           </div>
                         )}
                       </div>
+                      {already && t.role === "vendor" && !ratingPhotoAddedIds.includes(key) && (
+                        <label className="f-mono text-[9px] text-[#14213D]/40 hover:text-[#14213D] underline cursor-pointer block text-right">
+                          {uploadingRatingPhoto === key ? "Envoi…" : "📷 Ajouter une photo de l'article reçu (aide les futurs acheteurs)"}
+                          <input type="file" accept="image/*" className="hidden" onChange={(e) => addRatingPhoto(o, t.phone, ratingDraft[key] || 5, e.target.files[0], key)} />
+                        </label>
+                      )}
+                      </React.Fragment>
                     );
                   })}
                 </div>
@@ -1795,6 +1900,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
   const [profileForm, setProfileForm] = useState({ name: vendorInfo.name, phone: vendorInfo.phone });
   const [publishing, setPublishing] = useState(false);
   const [publishError, setPublishError] = useState("");
+  const [certifiedAccurate, setCertifiedAccurate] = useState(false);
   const [uploadingImg, setUploadingImg] = useState(false);
   const [uploadingEditImg, setUploadingEditImg] = useState(false);
   const [uploadingVideo, setUploadingVideo] = useState(false);
@@ -2192,15 +2298,20 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
             <input placeholder="Point de repère pour ce produit (facultatif — sinon celui de ton profil est utilisé)" value={form.vendorLandmark} onChange={(e) => setForm({ ...form, vendorLandmark: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#2D6A4F]" />
             <input placeholder="Délai de préparation (ex: 24h)" value={form.deliveryTime} onChange={(e) => setForm({ ...form, deliveryTime: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#2D6A4F]" />
             <p className="f-body text-[11px] text-[#14213D]/40">Les frais de livraison ne sont plus fixés ici : c'est le livreur qui propose son prix quand il accepte la commande.</p>
+            <label className="flex items-start gap-2 bg-[#F2A93B]/10 border-2 border-[#F2A93B]/30 rounded-lg px-3 py-2 cursor-pointer">
+              <input type="checkbox" checked={certifiedAccurate} onChange={(e) => setCertifiedAccurate(e.target.checked)} className="w-4 h-4 mt-0.5 accent-[#2D6A4F]" />
+              <span className="f-body text-[11px] text-[#14213D]">Je certifie que ces photos/vidéos représentent fidèlement l'article réellement vendu (forme, taille, marque, modèle).</span>
+            </label>
             {publishError && <p className="f-body text-xs text-[#C1440E]">{publishError}</p>}
             <button
-              disabled={!form.name || !form.price || !form.zone || publishing}
+              disabled={!form.name || !form.price || !form.zone || !certifiedAccurate || publishing}
               onClick={async () => {
                 setPublishing(true);
                 setPublishError("");
                 try {
                   await addProduct({ ...form, price: Number(form.price), stock: Number(form.stock) || 0, deliveryTime: form.deliveryTime || "Non précisé", vendorName: vendorInfo.name, vendorPhone: vendorInfo.phone });
                   setForm({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrls: [], videoUrls: [], deliveryTime: "", description: "", vendorLandmark: vendorInfo.landmark || "" });
+                  setCertifiedAccurate(false);
                 } catch (e) {
                   setPublishError(e.message || "Impossible de publier le produit. Réessaie.");
                 }
@@ -2771,6 +2882,28 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
   const [showAdminLog, setShowAdminLog] = useState(false);
   const [notes, setNotes] = useState([]);
   const [showNotes, setShowNotes] = useState(false);
+  const [disputes, setDisputes] = useState([]);
+  const [disputesBusy, setDisputesBusy] = useState(null);
+
+  async function loadDisputes() {
+    try {
+      setDisputes(await apiSend("/api/admin/disputes", "GET", undefined, ownerToken));
+    } catch (e) {
+      console.error("Erreur de chargement des litiges:", e);
+    }
+  }
+  useEffect(() => { if (ownerToken) loadDisputes(); }, [ownerToken]);
+
+  async function resolveDispute(id, resolution) {
+    setDisputesBusy(id);
+    try {
+      await apiSend(`/api/admin/disputes/${id}/resolve`, "POST", { resolution }, ownerToken);
+      loadDisputes();
+    } catch (e) {
+      alert(e.message || "Erreur pendant la résolution du litige.");
+    }
+    setDisputesBusy(null);
+  }
   const [noteDraft, setNoteDraft] = useState("");
   const [notesBusy, setNotesBusy] = useState(false);
   const [resetConfirmText, setResetConfirmText] = useState("");
@@ -3245,6 +3378,34 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
         </button>
       </div>
 
+      <div className="ticket bg-white border-2 border-[#C1440E]/30 p-4 mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <p className="f-mono text-[11px] uppercase tracking-wide text-[#C1440E]">⚠️ Litiges de conformité ({disputes.filter((d) => d.status === "open").length} ouvert{disputes.filter((d) => d.status === "open").length > 1 ? "s" : ""})</p>
+          <button onClick={loadDisputes} className="f-mono text-[10px] text-[#14213D]/40 hover:text-[#14213D] underline">Actualiser</button>
+        </div>
+        {disputes.filter((d) => d.status === "open").length === 0 ? (
+          <p className="f-body text-xs text-[#14213D]/40">Aucun litige ouvert pour l'instant.</p>
+        ) : (
+          <div className="space-y-3">
+            {disputes.filter((d) => d.status === "open").map((d) => (
+              <div key={d.id} className="border-2 border-[#C1440E]/20 rounded-xl p-3">
+                <p className="f-mono text-[10px] text-[#14213D]/50">Commande #{d.orderId.slice(-6)} · Vendeur : {d.vendorPhone || "—"} · Acheteur : {d.buyerPhone}</p>
+                {d.description && <p className="f-body text-xs text-[#14213D] mt-1.5">"{d.description}"</p>}
+                {d.photoUrl && <img src={d.photoUrl} alt="Article reçu" className="w-32 h-32 rounded-lg object-cover border-2 border-[#14213D]/10 mt-2" />}
+                <div className="flex gap-2 mt-2">
+                  <button disabled={disputesBusy === d.id} onClick={() => resolveDispute(d.id, "buyer")} className="flex-1 f-mono text-[10px] bg-[#C1440E] disabled:opacity-40 text-white py-1.5 rounded-full">
+                    En faveur de l'acheteur (rembourser)
+                  </button>
+                  <button disabled={disputesBusy === d.id} onClick={() => resolveDispute(d.id, "vendor")} className="flex-1 f-mono text-[10px] bg-[#2D6A4F] disabled:opacity-40 text-white py-1.5 rounded-full">
+                    En faveur du vendeur (débloquer)
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
         <div className="flex items-center justify-between mb-3">
           <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60">Sécurité — vendeurs à surveiller</p>
@@ -3680,6 +3841,10 @@ function App() {
     const updated = await apiSend(`/api/orders/${id}/confirm-buyer`, "POST", undefined, getPhoneToken(buyerInfo.phone));
     setOrders((prev) => prev.map((o) => (o.id === id ? updated : o)));
   }
+  async function disputeOrder(orderId, phone, description, photoUrl) {
+    const updated = await apiSend(`/api/orders/${orderId}/dispute`, "POST", { phone, description, photoUrl }, getPhoneToken(phone));
+    setOrders((prev) => prev.map((o) => (o.id === orderId ? updated : o)));
+  }
 
   const myOrders = orders.filter((o) => o.buyerPhone === buyerInfo.phone && buyerInfo.phone);
 
@@ -3699,7 +3864,7 @@ function App() {
               cart={cart} setCart={setCart}
               buyerInfo={buyerInfo} registerBuyer={registerBuyer} logoutBuyer={logoutBuyer}
               placeOrder={placeOrder} cancelOrder={cancelOrder} deleteMyOrder={deleteMyOrder} showCart={showCart} setShowCart={setShowCart}
-              myOrders={myOrders} chooseCourierForOrder={chooseCourierForOrder} confirmDeliveryByBuyer={confirmDeliveryByBuyer}
+              myOrders={myOrders} chooseCourierForOrder={chooseCourierForOrder} confirmDeliveryByBuyer={confirmDeliveryByBuyer} disputeOrder={disputeOrder}
               proposeTransport={proposeTransport} confirmTransport={confirmTransport}
               tip={siteContent.tipBuyer}
             />
