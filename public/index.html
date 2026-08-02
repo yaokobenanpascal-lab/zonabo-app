@@ -864,6 +864,49 @@ function PaymentBadges() {
   );
 }
 
+// Fenêtre de réflexion gratuite (10 min) après une commande — l'acheteur
+// peut annuler librement pendant ce temps, le vendeur n'a pas encore le
+// droit de confirmer. Affiche un compte à rebours en direct.
+const ORDER_GRACE_PERIOD_MS_CLIENT = 10 * 60 * 1000;
+function GracePeriodNotice({ createdAt }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 15000);
+    return () => clearInterval(t);
+  }, []);
+  const remainingMs = ORDER_GRACE_PERIOD_MS_CLIENT - (now - createdAt);
+  if (remainingMs <= 0) return null;
+  const minutes = Math.ceil(remainingMs / 60000);
+  return (
+    <p className="f-body text-[11px] text-[#2D6A4F] bg-[#2D6A4F]/10 border border-[#2D6A4F]/20 rounded-lg px-2 py-1 mt-1.5">
+      🕐 Tu peux encore annuler librement pendant {minutes} minute{minutes > 1 ? "s" : ""} — le vendeur n'a pas encore commencé à préparer ta commande.
+    </p>
+  );
+}
+
+// Bouton "Confirmer la commande" côté vendeur — désactivé tant que la
+// fenêtre de réflexion de l'acheteur n'est pas passée.
+function VendorConfirmButton({ order, onConfirm, onCancel }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 15000);
+    return () => clearInterval(t);
+  }, []);
+  const remainingMs = ORDER_GRACE_PERIOD_MS_CLIENT - (now - order.createdAt);
+  if (remainingMs > 0) {
+    const minutes = Math.ceil(remainingMs / 60000);
+    return (
+      <p className="f-body text-[11px] text-[#14213D]/50">🕐 L'acheteur a encore {minutes} minute{minutes > 1 ? "s" : ""} pour changer d'avis librement — tu pourras confirmer ensuite.</p>
+    );
+  }
+  return (
+    <div className="flex gap-2">
+      <button onClick={() => onConfirm(order.id)} className="flex-1 f-mono text-xs bg-[#2D6A4F] text-white py-1.5 rounded-full">Confirmer la commande</button>
+      <button onClick={() => onCancel(order.id)} className="flex-1 f-mono text-xs bg-[#C1440E]/10 text-[#C1440E] py-1.5 rounded-full">Annuler</button>
+    </div>
+  );
+}
+
 function StatusBadge({ status }) {
   const map = {
     nouvelle: { label: "Attente confirmation", bg: "#F2A93B", fg: "#14213D", icon: Clock },
@@ -1635,6 +1678,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
               <ul className="f-body text-sm text-[#14213D]/70">
                 {o.items.map((it) => <li key={it.id}>{it.qty}× {it.name}</li>)}
               </ul>
+              {o.status === "nouvelle" && <GracePeriodNotice createdAt={o.createdAt} />}
               <div className="flex items-center justify-between mt-2">
                 <p className="f-mono text-sm font-semibold text-[#14213D]">{o.total.toLocaleString("fr-FR")} F</p>
                 <span className={`f-mono text-[10px] px-1.5 py-0.5 rounded ${o.paid ? "bg-[#2D6A4F]/10 text-[#2D6A4F]" : "bg-[#14213D]/5 text-[#14213D]/50"}`}>
@@ -1816,7 +1860,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                         🏍️ Livraison locale par livreur — même zone/ville
                       </button>
                       <button
-                        onClick={() => setShippingMethod("transport")}
+                        onClick={() => { setShippingMethod("transport"); setPaymentMethod("cinetpay"); }}
                         className={`f-mono text-xs px-3 py-2.5 rounded-lg border-2 text-left ${shippingMethod === "transport" ? "border-[#F2A93B] bg-[#F2A93B]/10 text-[#14213D]" : "border-[#14213D]/15 text-[#14213D]/50"}`}
                       >
                         🚌 Expédition vers une autre ville — via compagnie de transport
@@ -1857,6 +1901,12 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                   </div>
                   <div>
                     <label className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 block mb-1.5">Mode de paiement</label>
+                    {shippingMethod === "transport" ? (
+                      <div className="bg-[#14213D]/5 rounded-lg px-3 py-2.5">
+                        <p className="f-mono text-xs text-[#14213D]">📱 Mobile Money / Carte — obligatoire pour ce mode d'expédition</p>
+                        <p className="f-body text-[10px] text-[#14213D]/40 mt-1">Le paiement à la livraison n'est pas possible avec une compagnie de transport : personne ne peut encaisser à l'agence. Ton paiement reste bloqué chez Zonako jusqu'à confirmation de ta réception.</p>
+                      </div>
+                    ) : (
                     <div className="grid grid-cols-2 gap-2">
                       <button
                         onClick={() => { setPaymentMethod("cinetpay"); setPayError(""); }}
@@ -1871,6 +1921,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                         💵 À la livraison
                       </button>
                     </div>
+                    )}
                     {paymentMethod === "cinetpay" && (
                       <div className="mt-2">
                         <PaymentBadges />
@@ -2460,10 +2511,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                       {o.shippingMethod === "transport" && o.transportCompany && (
                         <p className="f-body text-[11px] text-[#14213D]/50 mb-2">🚌 L'acheteur propose "{o.transportCompany}" pour l'expédition — confirme d'abord la commande pour pouvoir répondre à ce sujet.</p>
                       )}
-                      <div className="flex gap-2">
-                        <button onClick={() => confirmOrder(o.id)} className="flex-1 f-mono text-xs bg-[#2D6A4F] text-white py-1.5 rounded-full">Confirmer la commande</button>
-                        <button onClick={() => cancelOrder(o.id)} className="flex-1 f-mono text-xs bg-[#C1440E]/10 text-[#C1440E] py-1.5 rounded-full">Annuler</button>
-                      </div>
+                      <VendorConfirmButton order={o} onConfirm={confirmOrder} onCancel={cancelOrder} />
                     </div>
                   )}
                   {o.shippingMethod === "transport" && o.status !== "livree" && o.status !== "annulee" && (
@@ -2891,6 +2939,17 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
   const [notes, setNotes] = useState([]);
   const [showNotes, setShowNotes] = useState(false);
   const [disputes, setDisputes] = useState([]);
+  const [buyerRisk, setBuyerRisk] = useState([]);
+
+  async function loadBuyerRisk() {
+    try {
+      setBuyerRisk(await apiSend("/api/buyers/risk", "GET", undefined, ownerToken));
+    } catch (e) {
+      console.error("Erreur de chargement de la fiabilité acheteurs:", e);
+    }
+  }
+  useEffect(() => { if (ownerToken) loadBuyerRisk(); }, [ownerToken]);
+
   const [disputesBusy, setDisputesBusy] = useState(null);
 
   async function loadDisputes() {
@@ -3413,6 +3472,21 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
           </div>
         )}
       </div>
+
+      {buyerRisk.length > 0 && (
+        <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
+          <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-1">Acheteurs à surveiller (annulations tardives)</p>
+          <p className="f-body text-[11px] text-[#14213D]/40 mb-3">Annulations après confirmation du vendeur (donc après la fenêtre de réflexion gratuite) — pas les changements d'avis normaux.</p>
+          <div className="space-y-2">
+            {buyerRisk.map((b) => (
+              <div key={b.phone} className={`border-2 rounded-xl p-3 ${b.lateCancelRate > 40 ? "border-[#C1440E]/30" : "border-[#14213D]/10"}`}>
+                <p className="f-body text-xs font-semibold text-[#14213D]">{b.name || "Sans nom"} <span className="f-mono text-[10px] text-[#14213D]/40">· {b.phone}</span></p>
+                <p className="f-mono text-[10px] text-[#14213D]/50 mt-1">{b.lateCancellations} annulation(s) tardive(s) sur {b.totalOrders} commande(s) ({b.lateCancelRate}%)</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
         <div className="flex items-center justify-between mb-3">
