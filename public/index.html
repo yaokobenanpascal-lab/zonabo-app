@@ -555,8 +555,14 @@ function TransportNegotiationCard({ order, viewerRole, viewerPhone, onPropose, o
   const [feeDraft, setFeeDraft] = useState(order.transportFee !== null ? String(order.transportFee) : "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 15000);
+    return () => clearInterval(t);
+  }, []);
 
   const settled = order.transportConfirmedByBuyer && order.transportConfirmedByVendor;
+  const settledRemainingMs = order.transportSettledAt ? ORDER_GRACE_PERIOD_MS_CLIENT - (now - order.transportSettledAt) : 0;
   const theirTurn = order.transportProposedBy && order.transportProposedBy !== viewerRole; // c'est à viewerRole de répondre
   const waitingOnOther = order.transportProposedBy === viewerRole && !settled;
   // Seul le vendeur fixe les frais — si personne n'en a encore mis, c'est forcément
@@ -599,7 +605,14 @@ function TransportNegotiationCard({ order, viewerRole, viewerPhone, onPropose, o
     <div className="ticket bg-white border-2 border-[#14213D]/10 p-3 mt-2">
       <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-1">🚌 Compagnie de transport</p>
       {settled ? (
-        <p className="f-body text-sm text-[#2D6A4F]">✅ {order.transportCompany} confirmée — Frais : {order.transportFee?.toLocaleString("fr-FR")} F</p>
+        <>
+          <p className="f-body text-sm text-[#2D6A4F]">✅ {order.transportCompany} confirmée — Frais : {order.transportFee?.toLocaleString("fr-FR")} F</p>
+          {settledRemainingMs > 0 && (
+            <p className="f-body text-[11px] text-[#14213D]/50 bg-[#14213D]/5 rounded-lg px-2 py-1 mt-1.5">
+              🕐 {viewerRole === "buyer" ? "Tu peux" : "L'acheteur peut"} encore changer d'avis sur cet accord pendant {Math.ceil(settledRemainingMs / 60000)} minute{Math.ceil(settledRemainingMs / 60000) > 1 ? "s" : ""} — {viewerRole === "vendor" ? "l'expédition sera possible ensuite." : "le vendeur n'expédiera qu'après ce délai."}
+            </p>
+          )}
+        </>
       ) : (
         <>
           <p className="f-body text-sm text-[#14213D]">
@@ -904,6 +917,40 @@ function VendorConfirmButton({ order, onConfirm, onCancel }) {
       <button onClick={() => onConfirm(order.id)} className="flex-1 f-mono text-xs bg-[#2D6A4F] text-white py-1.5 rounded-full">Confirmer la commande</button>
       <button onClick={() => onCancel(order.id)} className="flex-1 f-mono text-xs bg-[#C1440E]/10 text-[#C1440E] py-1.5 rounded-full">Annuler</button>
     </div>
+  );
+}
+
+// Bouton "Marquer expédiée" côté vendeur (expédition transport) — respecte la
+// deuxième fenêtre de réflexion, démarrée une fois l'accord de transport trouvé.
+function VendorShipButton({ order, shipForm, setShipForm, shipOrder }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 15000);
+    return () => clearInterval(t);
+  }, []);
+  const remainingMs = order.transportSettledAt ? ORDER_GRACE_PERIOD_MS_CLIENT - (now - order.transportSettledAt) : 0;
+  if (remainingMs > 0) {
+    const minutes = Math.ceil(remainingMs / 60000);
+    return (
+      <p className="f-body text-[11px] text-[#14213D]/50">🕐 Encore {minutes} minute{minutes > 1 ? "s" : ""} avant de pouvoir expédier — laisse à l'acheteur le temps de revenir sur cet accord si besoin.</p>
+    );
+  }
+  return (
+    <>
+      <p className="f-body text-[11px] text-[#14213D]/50">Remets le colis à {order.transportCompany} vers {order.zone}, puis renseigne le numéro de suivi pour que {order.buyerName} puisse récupérer sa commande.</p>
+      <input
+        placeholder="Numéro de suivi / bordereau"
+        value={shipForm[order.id]?.tracking || ""}
+        onChange={(e) => setShipForm({ ...shipForm, [order.id]: { ...shipForm[order.id], tracking: e.target.value } })}
+        className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-xs focus:outline-none focus:border-[#3B6FA0]"
+      />
+      <button
+        onClick={() => shipOrder(order.id, order.transportCompany, shipForm[order.id]?.tracking || "")}
+        className="w-full f-mono text-xs bg-[#3B6FA0] text-white py-1.5 rounded-full"
+      >
+        Marquer expédiée (transport)
+      </button>
+    </>
   );
 }
 
@@ -1394,6 +1441,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
   const [buyerAddress, setBuyerAddress] = useState("");
   const [paymentMethod, setPaymentMethod] = useState("cinetpay"); // "cinetpay" | "cod"
   const [payProcessing, setPayProcessing] = useState(false);
+  const [showOrderReview, setShowOrderReview] = useState(false);
   const [payError, setPayError] = useState("");
   const [payNotice, setPayNotice] = useState("");
   const [reportingOrderId, setReportingOrderId] = useState(null);
@@ -1932,15 +1980,49 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                   {payNotice && <p className="f-body text-xs text-[#2D6A4F]">{payNotice}</p>}
                   <button
                     disabled={!deliveryZone || payProcessing}
-                    onClick={handleCheckout}
+                    onClick={() => setShowOrderReview(true)}
                     className="w-full bg-[#C1440E] disabled:opacity-30 text-white f-display font-semibold py-3 rounded-full text-sm"
                   >
-                    {payProcessing ? "Paiement en cours…" : paymentMethod === "cinetpay" ? `Payer ${total.toLocaleString("fr-FR")} F` : "Commander (paiement à la livraison)"}
+                    {payProcessing ? "Paiement en cours…" : "Vérifier ma commande"}
                   </button>
                   {!deliveryZone && <p className="f-body text-xs text-[#C1440E]">Précise une zone de livraison exacte avant de commander (même si tu as parcouru en mode national).</p>}
                 </div>
               </>
             )}
+          </div>
+        </div>
+      )}
+      {showOrderReview && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center p-4" onClick={() => setShowOrderReview(false)}>
+          <div className="ticket bg-white border-2 border-[#14213D]/10 p-5 max-w-md w-full max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-1">Vérifie ta commande</p>
+            <p className="f-body text-xs text-[#14213D]/50 mb-3">Prends un instant avant de continuer — une fois confirmée, tu auras encore 10 minutes pour changer d'avis librement.</p>
+            <ul className="f-body text-sm text-[#14213D] divide-y divide-[#14213D]/10 mb-3">
+              {cart.map((i) => (
+                <li key={i.id} className="py-1.5 flex justify-between">
+                  <span>{i.qty}× {i.name}</span>
+                  <span className="f-mono text-xs">{(i.price * i.qty).toLocaleString("fr-FR")} F</span>
+                </li>
+              ))}
+            </ul>
+            <div className="f-body text-xs text-[#14213D]/70 space-y-1 mb-3">
+              <p>📍 Zone : {deliveryZone || "—"}</p>
+              {buyerAddress && <p>🏠 Adresse : {buyerAddress}</p>}
+              <p>🚚 Livraison : {shippingMethod === "transport" ? `Compagnie de transport${preferredTransportCompany ? ` (${preferredTransportCompany})` : ""}` : "Livreur local"}</p>
+              <p>💳 Paiement : {paymentMethod === "cinetpay" ? "Mobile Money / Carte" : "À la livraison"}</p>
+            </div>
+            <p className="f-display text-lg font-semibold text-[#14213D] mb-3">Total : {total.toLocaleString("fr-FR")} F</p>
+            {payError && <p className="f-body text-xs text-[#C1440E] mb-2">{payError}</p>}
+            <div className="flex gap-2">
+              <button onClick={() => setShowOrderReview(false)} className="flex-1 f-mono text-xs bg-[#14213D]/10 text-[#14213D] py-2.5 rounded-full">Modifier</button>
+              <button
+                disabled={payProcessing}
+                onClick={() => { setShowOrderReview(false); handleCheckout(); }}
+                className="flex-1 f-mono text-xs bg-[#C1440E] disabled:opacity-40 text-white py-2.5 rounded-full"
+              >
+                {payProcessing ? "…" : paymentMethod === "cinetpay" ? `Je confirme, payer ${total.toLocaleString("fr-FR")} F` : "Je confirme la commande"}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -2518,21 +2600,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                     <div className="mt-3 pt-3 border-t border-dashed border-[#14213D]/10 space-y-2">
                       <TransportNegotiationCard order={o} viewerRole="vendor" viewerPhone={vendorInfo.phone} onPropose={proposeTransport} onConfirm={confirmTransport} />
                       {o.status === "confirmee" && o.transportConfirmedByBuyer && o.transportConfirmedByVendor && (
-                        <>
-                          <p className="f-body text-[11px] text-[#14213D]/50">Remets le colis à {o.transportCompany} vers {o.zone}, puis renseigne le numéro de suivi pour que {o.buyerName} puisse récupérer sa commande.</p>
-                          <input
-                            placeholder="Numéro de suivi / bordereau"
-                            value={shipForm[o.id]?.tracking || ""}
-                            onChange={(e) => setShipForm({ ...shipForm, [o.id]: { ...shipForm[o.id], tracking: e.target.value } })}
-                            className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-xs focus:outline-none focus:border-[#3B6FA0]"
-                          />
-                          <button
-                            onClick={() => shipOrder(o.id, o.transportCompany, shipForm[o.id]?.tracking || "")}
-                            className="w-full f-mono text-xs bg-[#3B6FA0] text-white py-1.5 rounded-full"
-                          >
-                            Marquer expédiée (transport)
-                          </button>
-                        </>
+                        <VendorShipButton order={o} shipForm={shipForm} setShipForm={setShipForm} shipOrder={shipOrder} />
                       )}
                     </div>
                   )}
