@@ -21,6 +21,10 @@ process.on("unhandledRejection", (err) => {
 });
 
 const PORT = process.env.PORT || 3000;
+// Fenêtre de réflexion gratuite pour l'acheteur après avoir passé une
+// commande — le vendeur ne peut pas la confirmer avant, pour ne jamais
+// s'engager sur une commande que l'acheteur pourrait encore changer d'avis.
+const ORDER_GRACE_PERIOD_MS = 10 * 60 * 1000; // 10 minutes
 const OWNER_PASSCODE = process.env.OWNER_PASSCODE || "";
 if (!OWNER_PASSCODE) {
   console.warn("⚠️  OWNER_PASSCODE n'est pas défini dans les variables d'environnement — l'espace propriétaire sera inaccessible tant que ce n'est pas réglé.");
@@ -466,6 +470,14 @@ app.get("/api/orders", async (req, res) => {
 
 app.post("/api/orders", requirePhone((req) => req.body.buyerPhone), async (req, res) => {
   const o = req.body; // { buyerName, buyerPhone, zone, items, total, deliveryFee, paymentMethod, cinetpayTransactionId, shippingMethod, clientKey }
+  // Le paiement à la livraison n'a pas de sens pour une expédition par
+  // compagnie de transport : personne n'est présent à l'agence pour encaisser
+  // au moment où l'acheteur récupère son colis. Seul le paiement en ligne
+  // (bloqué chez le propriétaire jusqu'à confirmation de réception) protège
+  // vraiment le vendeur dans ce cas.
+  if (o.shippingMethod === "transport" && o.paymentMethod !== "cinetpay") {
+    return res.status(400).json({ error: "Le paiement à la livraison n'est pas disponible pour l'expédition par compagnie de transport — un paiement en ligne est requis." });
+  }
   // Anti-doublon : si ce même clientKey a déjà créé une commande il y a moins de
   // 30 secondes (double-clic, mauvaise connexion qui fait réessayer...), on renvoie
   // la commande déjà créée au lieu d'en recréer une deuxième.
@@ -529,7 +541,10 @@ app.post("/api/orders", requirePhone((req) => req.body.buyerPhone), async (req, 
 // annuler sa propre commande (ex : paiement CinetPay refusé/annulé).
 app.patch("/api/orders/:id", async (req, res) => {
   const tokenPhone = await getTokenPhone(req);
-  const { rows: existing } = await pool.query("SELECT items, buyer_phone, paid, status AS old_status FROM orders WHERE id = $1", [req.params.id]);
+  const { rows: existing } = await pool.query(
+    "SELECT items, buyer_phone, paid, status AS old_status, shipping_method, created_at FROM orders WHERE id = $1",
+    [req.params.id]
+  );
   if (!existing[0]) return res.status(404).json({ error: "Commande introuvable." });
   const vendorPhones = (existing[0].items || []).map((it) => it.vendorPhone).filter(Boolean);
   const isVendor = tokenPhone && vendorPhones.includes(tokenPhone);
@@ -538,6 +553,13 @@ app.patch("/api/orders/:id", async (req, res) => {
     return res.status(403).json({ error: "Tu n'es ni le vendeur ni l'acheteur de cette commande." });
   }
   const patch = req.body;
+  // Fenêtre de réflexion : le vendeur ne peut pas confirmer avant qu'elle soit
+  // passée — laisse à l'acheteur une vraie marge pour changer d'avis sans
+  // jamais faire perdre de temps/argent au vendeur.
+  if (patch.status === "confirmee" && Date.now() - Number(existing[0].created_at) < ORDER_GRACE_PERIOD_MS) {
+    const remainingMin = Math.ceil((ORDER_GRACE_PERIOD_MS - (Date.now() - Number(existing[0].created_at))) / 60000);
+    return res.status(400).json({ error: `Laisse encore ${remainingMin} minute(s) à l'acheteur pour changer d'avis avant de confirmer.` });
+  }
   const colMap = { status: "status", transportCompany: "transport_company", trackingNumber: "tracking_number" };
   const sets = [];
   const vals = [];
@@ -551,6 +573,12 @@ app.patch("/api/orders/:id", async (req, res) => {
   if (patch.status === "annulee" && existing[0].paid) {
     sets.push(`refund_status = $${i++}`);
     vals.push("pending");
+  }
+  // Annulation tardive (après confirmation vendeur, pas pendant la fenêtre de
+  // réflexion) — comptabilisée pour le score de fiabilité de l'acheteur.
+  if (patch.status === "annulee" && existing[0].old_status !== "nouvelle" && existing[0].old_status !== "annulee") {
+    sets.push(`late_cancellation = $${i++}`);
+    vals.push(true);
   }
   if (sets.length === 0) return res.status(400).json({ error: "Rien à mettre à jour." });
   vals.push(req.params.id);
@@ -725,7 +753,8 @@ app.post("/api/orders/:id/transport-propose", requirePhone((req) => req.body.pho
   }
   await pool.query(
     `UPDATE orders SET transport_company = $1, transport_fee = $2, transport_proposed_by = $3,
-       transport_confirmed_by_buyer = $4, transport_confirmed_by_vendor = $5 WHERE id = $6`,
+       transport_confirmed_by_buyer = $4, transport_confirmed_by_vendor = $5
+     WHERE id = $6`,
     [company, fee, role, role === "buyer", role === "vendor", req.params.id]
   );
   const { rows: r2 } = await pool.query("SELECT * FROM orders WHERE id = $1", [req.params.id]);
@@ -995,6 +1024,28 @@ app.get("/api/vendors/risk", requireOwner, async (req, res) => {
     };
   }).sort((a, b) => (b.openReports - a.openReports) || (b.cancelRate - a.cancelRate));
 
+  res.json(result);
+});
+
+// Fiabilité des acheteurs (annulations tardives, après confirmation vendeur)
+// — réservé au propriétaire, pour repérer les acheteurs à surveiller sans
+// bloquer les changements d'avis normaux pendant la fenêtre de réflexion.
+app.get("/api/buyers/risk", requireOwner, async (req, res) => {
+  const { rows: orders } = await pool.query("SELECT buyer_name, buyer_phone, status, late_cancellation FROM orders");
+  const stats = {}; // phone -> { name, total, lateCancellations }
+  for (const o of orders) {
+    if (!o.buyer_phone) continue;
+    stats[o.buyer_phone] = stats[o.buyer_phone] || { name: o.buyer_name, total: 0, lateCancellations: 0 };
+    stats[o.buyer_phone].total += 1;
+    if (o.late_cancellation) stats[o.buyer_phone].lateCancellations += 1;
+  }
+  const result = Object.entries(stats)
+    .filter(([, s]) => s.lateCancellations > 0)
+    .map(([phone, s]) => ({
+      phone, name: s.name, totalOrders: s.total, lateCancellations: s.lateCancellations,
+      lateCancelRate: Math.round((s.lateCancellations / s.total) * 100),
+    }))
+    .sort((a, b) => b.lateCancellations - a.lateCancellations);
   res.json(result);
 });
 
