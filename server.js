@@ -221,6 +221,9 @@ function mapOrder(r) {
     transportProposedBy: r.transport_proposed_by || null,
     transportConfirmedByBuyer: r.transport_confirmed_by_buyer || false,
     transportConfirmedByVendor: r.transport_confirmed_by_vendor || false,
+    transportSettledAt: r.transport_settled_at ? Number(r.transport_settled_at) : null,
+    inTransitAt: r.in_transit_at ? Number(r.in_transit_at) : null,
+    autoConfirmed: r.auto_confirmed || false,
     buyerAddress: r.buyer_address || "",
     orderSeq: r.order_seq || null,
   };
@@ -542,7 +545,7 @@ app.post("/api/orders", requirePhone((req) => req.body.buyerPhone), async (req, 
 app.patch("/api/orders/:id", async (req, res) => {
   const tokenPhone = await getTokenPhone(req);
   const { rows: existing } = await pool.query(
-    "SELECT items, buyer_phone, paid, status AS old_status, shipping_method, created_at FROM orders WHERE id = $1",
+    "SELECT items, buyer_phone, paid, status AS old_status, shipping_method, created_at, transport_settled_at FROM orders WHERE id = $1",
     [req.params.id]
   );
   if (!existing[0]) return res.status(404).json({ error: "Commande introuvable." });
@@ -560,12 +563,25 @@ app.patch("/api/orders/:id", async (req, res) => {
     const remainingMin = Math.ceil((ORDER_GRACE_PERIOD_MS - (Date.now() - Number(existing[0].created_at))) / 60000);
     return res.status(400).json({ error: `Laisse encore ${remainingMin} minute(s) à l'acheteur pour changer d'avis avant de confirmer.` });
   }
+  // Deuxième fenêtre de réflexion, spécifique à l'expédition : une fois la
+  // compagnie de transport et les frais convenus des deux côtés, le vendeur
+  // ne peut pas expédier avant que ce délai soit passé non plus.
+  if (patch.status === "en_transit" && existing[0].transport_settled_at && Date.now() - Number(existing[0].transport_settled_at) < ORDER_GRACE_PERIOD_MS) {
+    const remainingMin = Math.ceil((ORDER_GRACE_PERIOD_MS - (Date.now() - Number(existing[0].transport_settled_at))) / 60000);
+    return res.status(400).json({ error: `Laisse encore ${remainingMin} minute(s) après l'accord sur le transport avant d'expédier.` });
+  }
   const colMap = { status: "status", transportCompany: "transport_company", trackingNumber: "tracking_number" };
   const sets = [];
   const vals = [];
   let i = 1;
   for (const key of Object.keys(colMap)) {
     if (patch[key] !== undefined) { sets.push(`${colMap[key]} = $${i++}`); vals.push(patch[key]); }
+  }
+  // Départ du délai avant confirmation automatique de réception (protège le
+  // vendeur si l'acheteur oublie ou néglige de confirmer lui-même).
+  if (patch.status === "en_transit") {
+    sets.push(`in_transit_at = $${i++}`);
+    vals.push(Date.now());
   }
   // Une commande déjà payée qui est annulée doit être remboursée — CinetPay
   // n'offre pas d'API de remboursement automatique, donc on la place dans une
@@ -648,8 +664,8 @@ app.post("/api/orders/:id/choose-courier", async (req, res) => {
   const { courierName, courierPhone, fee } = req.body;
   const { rows: courierProf } = await pool.query("SELECT vehicle_type, vehicle_plate FROM profiles WHERE role = 'courier' AND phone = $1", [courierPhone]);
   await pool.query(
-    "UPDATE orders SET status = 'en_livraison', courier_name = $1, courier_phone = $2, delivery_fee = $3, courier_vehicle_type = $4, courier_vehicle_plate = $5 WHERE id = $6",
-    [courierName, courierPhone, Number(fee) || 0, courierProf[0]?.vehicle_type || "", courierProf[0]?.vehicle_plate || "", req.params.id]
+    "UPDATE orders SET status = 'en_livraison', courier_name = $1, courier_phone = $2, delivery_fee = $3, courier_vehicle_type = $4, courier_vehicle_plate = $5, in_transit_at = $6 WHERE id = $7",
+    [courierName, courierPhone, Number(fee) || 0, courierProf[0]?.vehicle_type || "", courierProf[0]?.vehicle_plate || "", Date.now(), req.params.id]
   );
   const { rows } = await pool.query("SELECT * FROM orders WHERE id = $1", [req.params.id]);
   const updated = mapOrder(rows[0]);
@@ -682,6 +698,31 @@ async function settleVendorCommission(orderId) {
     }
   } catch (e) {
     console.error("Erreur lors du règlement de la commission vendeur:", e);
+  }
+}
+
+// Confirmation automatique de réception si l'acheteur reste inactif plus de
+// 3 jours après l'expédition/mise en livraison — protège le vendeur d'un
+// acheteur qui oublie ou néglige de confirmer lui-même. Tourne toutes les
+// heures pendant que le serveur est en ligne.
+const AUTO_CONFIRM_DELAY_MS = 3 * 24 * 60 * 60 * 1000; // 3 jours
+async function autoConfirmStaleDeliveries() {
+  try {
+    const cutoff = Date.now() - AUTO_CONFIRM_DELAY_MS;
+    const { rows } = await pool.query(
+      "SELECT id FROM orders WHERE status IN ('en_livraison', 'en_transit') AND in_transit_at IS NOT NULL AND in_transit_at < $1",
+      [cutoff]
+    );
+    for (const row of rows) {
+      await pool.query(
+        "UPDATE orders SET status = 'livree', auto_confirmed = true, buyer_confirmed = true, buyer_confirmed_at = $1, courier_confirmed = true, courier_confirmed_at = COALESCE(courier_confirmed_at, $1) WHERE id = $2",
+        [Date.now(), row.id]
+      );
+      await settleVendorCommission(row.id);
+      logAdminAction("Réception confirmée automatiquement (acheteur inactif 3 jours)", null, `Commande #${row.id.slice(-6)}`);
+    }
+  } catch (e) {
+    console.error("Erreur pendant la confirmation automatique des livraisons:", e);
   }
 }
 
@@ -782,7 +823,7 @@ app.post("/api/orders/:id/transport-confirm", requirePhone((req) => req.body.pho
   const updated = r2[0];
   // Accord des deux côtés : les frais négociés deviennent les frais de livraison officiels de la commande.
   if (updated.transport_confirmed_by_buyer && updated.transport_confirmed_by_vendor) {
-    await pool.query("UPDATE orders SET delivery_fee = $1 WHERE id = $2", [Number(updated.transport_fee) || 0, req.params.id]);
+    await pool.query("UPDATE orders SET delivery_fee = $1, transport_settled_at = $2 WHERE id = $3", [Number(updated.transport_fee) || 0, Date.now(), req.params.id]);
   }
   const { rows: r3 } = await pool.query("SELECT * FROM orders WHERE id = $1", [req.params.id]);
   res.json(mapOrder(r3[0]));
@@ -1591,4 +1632,7 @@ app.get("*", (req, res) => res.sendFile(path.join(__dirname, "public", "index.ht
 // planter sur une colonne "pas encore ajoutée" (ça nous est déjà arrivé).
 ensureSchema().then(() => {
   app.listen(PORT, () => console.log(`Zonako backend en écoute sur le port ${PORT}`));
+  // Vérifie toutes les heures s'il y a des livraisons à confirmer automatiquement.
+  autoConfirmStaleDeliveries();
+  setInterval(autoConfirmStaleDeliveries, 60 * 60 * 1000);
 });
