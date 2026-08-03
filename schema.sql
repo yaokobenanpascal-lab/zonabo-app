@@ -305,3 +305,29 @@ CREATE INDEX IF NOT EXISTS idx_disputes_status ON order_disputes(status);
 -- Photo "reçue" jointe par l'acheteur à son avis — preuve visible par les
 -- futurs acheteurs, à côté des photos/vidéos du vendeur.
 ALTER TABLE ratings ADD COLUMN IF NOT EXISTS photo_url TEXT;
+
+-- Acompte de garantie facultatif (expédition par compagnie de transport) : le
+-- vendeur peut demander un acompte, montant de son choix, payé par l'acheteur
+-- via CinetPay et bloqué chez le propriétaire. Si l'acheteur annule APRÈS que
+-- le vendeur a déjà expédié (frais engagés), l'acompte compense le vendeur au
+-- lieu d'être remboursé.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS transport_deposit_amount NUMERIC;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS transport_deposit_paid BOOLEAN NOT NULL DEFAULT false;
+
+-- Marque une annulation "tardive" : l'acheteur a annulé après que le vendeur
+-- avait déjà confirmé la commande (donc engagé du temps/argent), pas pendant
+-- la fenêtre de réflexion gratuite. Sert au score de fiabilité acheteur.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS late_cancellation BOOLEAN NOT NULL DEFAULT false;
+
+-- Horodatage du moment où acheteur ET vendeur ont tous deux confirmé la
+-- compagnie de transport et les frais — sert de départ à une deuxième
+-- fenêtre de réflexion (10 min) avant que le vendeur puisse expédier.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS transport_settled_at BIGINT;
+
+-- Confirmation automatique de réception si l'acheteur reste inactif : évite
+-- que le vendeur reste bloqué indéfiniment si l'acheteur oublie ou néglige de
+-- confirmer. in_transit_at = quand la commande est passée "en livraison"/
+-- "en transit" ; auto_confirmed = true si la confirmation a été automatique
+-- (pas un vrai clic de l'acheteur), affiché pour rester transparent.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS in_transit_at BIGINT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS auto_confirmed BOOLEAN NOT NULL DEFAULT false;
