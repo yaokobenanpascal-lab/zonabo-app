@@ -897,6 +897,19 @@ function GracePeriodNotice({ createdAt }) {
   );
 }
 
+// Informe l'acheteur que la commande sera automatiquement considérée comme
+// reçue après 3 jours d'inactivité — pour qu'il ne soit jamais surpris.
+const AUTO_CONFIRM_DELAY_MS_CLIENT = 3 * 24 * 60 * 60 * 1000;
+function AutoConfirmNotice({ inTransitAt }) {
+  if (!inTransitAt) return null;
+  const deadline = new Date(inTransitAt + AUTO_CONFIRM_DELAY_MS_CLIENT);
+  return (
+    <p className="f-body text-[10px] text-[#14213D]/40 mt-1">
+      ⏳ Si tu ne confirmes ni ne signales de problème, ta commande sera automatiquement validée le {deadline.toLocaleDateString("fr-FR")} à {deadline.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}.
+    </p>
+  );
+}
+
 // Bouton "Confirmer la commande" côté vendeur — désactivé tant que la
 // fenêtre de réflexion de l'acheteur n'est pas passée.
 function VendorConfirmButton({ order, onConfirm, onCancel }) {
@@ -1745,10 +1758,11 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                       <p className="f-mono text-[10px] text-[#14213D]/50">🚌 {o.transportCompany} · Suivi : {o.trackingNumber || "en attente du numéro"}</p>
                       <p className="f-body text-[11px] text-[#14213D]/40 mt-0.5">Récupère ton colis à l'agence {o.transportCompany} de {o.zone}, puis confirme ci-dessous.</p>
                       <DisputeOrConfirm orderId={o.id} buyerPhone={buyerInfo.phone} confirmLabel="J'ai récupéré mon colis" onConfirm={confirmDeliveryByBuyer} onDispute={disputeOrder} />
+                      <AutoConfirmNotice inTransitAt={o.inTransitAt} />
                     </div>
                   )}
                   {o.status === "livree" && (
-                    <p className="f-mono text-[10px] text-[#2D6A4F] mt-1">✓ Colis récupéré — merci !</p>
+                    <p className="f-mono text-[10px] text-[#2D6A4F] mt-1">✓ Colis récupéré — merci !{o.autoConfirmed ? " (validé automatiquement après 3 jours)" : ""}</p>
                   )}
                 </>
               )}
@@ -1759,11 +1773,14 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                   </p>
                   <CourierTrackingCard order={o} />
                   {o.status !== "livree" && !o.buyerConfirmed && (
-                    <DisputeOrConfirm orderId={o.id} buyerPhone={buyerInfo.phone} confirmLabel="J'ai reçu ma commande" onConfirm={confirmDeliveryByBuyer} onDispute={disputeOrder} />
+                    <>
+                      <DisputeOrConfirm orderId={o.id} buyerPhone={buyerInfo.phone} confirmLabel="J'ai reçu ma commande" onConfirm={confirmDeliveryByBuyer} onDispute={disputeOrder} />
+                      <AutoConfirmNotice inTransitAt={o.inTransitAt} />
+                    </>
                   )}
                   {o.buyerConfirmed && (
                     <p className="f-mono text-[10px] text-[#2D6A4F] mt-1">
-                      ✓ Toi : réception confirmée{o.courierConfirmed ? " · ✓ Livreur : livraison confirmée" : " — en attente que le livreur confirme"}
+                      ✓ Toi : réception confirmée{o.courierConfirmed ? " · ✓ Livreur : livraison confirmée" : " — en attente que le livreur confirme"}{o.autoConfirmed ? " (validé automatiquement après 3 jours)" : ""}
                     </p>
                   )}
                 </div>
