@@ -2254,9 +2254,6 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
           </h2>
         )}
         <div className="flex items-center gap-3">
-          <button onClick={() => setRole("owner")} className="f-mono text-[11px] text-[#14213D]/30 hover:text-[#14213D]/60 flex items-center gap-1">
-            <TrendingUp size={12} /> Espace propriétaire
-          </button>
           <button onClick={logoutVendor} className="f-mono text-[11px] text-[#14213D]/40 hover:text-[#C1440E]">Changer de compte</button>
         </div>
       </div>
@@ -2290,7 +2287,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
         </div>
       </div>
 
-      {revenue && (revenue.pendingProceeds > 0 || revenue.availableProceeds > 0 || vWithdrawals.length > 0) && (
+      {revenue && (
         <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
           <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-1">💳 Paiements en ligne (séquestre)</p>
           <p className="f-body text-[11px] text-[#14213D]/40 mb-3">L'argent des commandes payées en ligne reste bloqué chez Zonako jusqu'à ce que l'acheteur confirme avoir reçu son colis — ensuite, il devient disponible ici.</p>
@@ -2319,6 +2316,9 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                 {vwBusy ? "…" : "Demander un retrait"}
               </button>
             </div>
+          )}
+          {revenue.availableToWithdraw <= 0 && revenue.pendingProceeds <= 0 && (
+            <p className="f-body text-xs text-[#14213D]/40">Rien à retirer pour l'instant — dès qu'un acheteur paie en ligne une commande et confirme sa réception, le montant (moins la commission) apparaîtra ici, prêt à être retiré.</p>
           )}
           {vWithdrawals.length > 0 && (
             <>
