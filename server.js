@@ -431,7 +431,7 @@ app.post("/api/products", requirePhone((req) => req.body.vendorPhone), async (re
       ? `🎉 ${p.vendorName} vient de rejoindre Zonako ! Découvre "${p.name}".`
       : `🆕 Nouveau chez ${p.vendorName} : "${p.name}".`;
     await pool.query(
-      "UPDATE site_content SET announcement_message = $1, announcement_product_id = $2, announcement_created_at = $3 WHERE id = 1",
+      "UPDATE site_content SET announcement_message = $1, announcement_product_id = $2, announcement_created_at = $3, announcement_video_url = NULL WHERE id = 1",
       [message, id, Date.now()]
     );
   } catch (e) {
@@ -1526,6 +1526,7 @@ function mapContent(r) {
     announcementMessage: r.announcement_message || "",
     announcementProductId: r.announcement_product_id || "",
     announcementCreatedAt: r.announcement_created_at ? Number(r.announcement_created_at) : null,
+    announcementVideoUrl: r.announcement_video_url || "",
   };
 }
 
@@ -1556,10 +1557,26 @@ app.put("/api/content", requireOwner, async (req, res) => {
 
 // Publier ou retirer l'annonce/bannière visible par tous les acheteurs inscrits.
 app.post("/api/content/announcement", requireOwner, async (req, res) => {
-  const { message, productId } = req.body;
+  const { message, productId, videoUrl } = req.body;
   await pool.query(
-    "UPDATE site_content SET announcement_message = $1, announcement_product_id = $2, announcement_created_at = $3 WHERE id = 1",
-    [message || null, productId || null, message ? Date.now() : null]
+    "UPDATE site_content SET announcement_message = $1, announcement_product_id = $2, announcement_created_at = $3, announcement_video_url = $4 WHERE id = 1",
+    [message || null, productId || null, message ? Date.now() : null, videoUrl || null]
+  );
+  const { rows } = await pool.query("SELECT * FROM site_content WHERE id = 1");
+  res.json(mapContent(rows[0]));
+});
+
+// Un vendeur peut pousser lui-même une courte vidéo "en direct" en bannière
+// à tous les acheteurs — pub vidéo rapide, sans vrai streaming temps réel.
+// Remplace l'annonce en cours (une seule à la fois, comme pour le reste).
+app.post("/api/vendors/:phone/live-announcement", requirePhone((req) => req.params.phone), async (req, res) => {
+  const { message, videoUrl } = req.body;
+  if (!videoUrl) return res.status(400).json({ error: "Une vidéo est requise." });
+  const { rows: prof } = await pool.query("SELECT * FROM profiles WHERE role = 'vendor' AND phone = $1", [req.params.phone]);
+  const vendorName = prof[0]?.name || "Un vendeur";
+  await pool.query(
+    "UPDATE site_content SET announcement_message = $1, announcement_product_id = NULL, announcement_created_at = $2, announcement_video_url = $3 WHERE id = 1",
+    [message?.trim() ? `🔴 ${vendorName} : ${message.trim()}` : `🔴 ${vendorName} est en direct !`, Date.now(), videoUrl]
   );
   const { rows } = await pool.query("SELECT * FROM site_content WHERE id = 1");
   res.json(mapContent(rows[0]));
