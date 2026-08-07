@@ -421,6 +421,22 @@ app.post("/api/products", requirePhone((req) => req.body.vendorPhone), async (re
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
     [id, p.name, p.price, p.category, p.zone, p.stock || 0, coverImage, p.deliveryTime || "Non précisé", p.vendorName, p.vendorPhone, createdAt, p.description || "", landmark, JSON.stringify(imageUrls), coverVideo, JSON.stringify(videoUrls)]
   );
+  // Annonce automatique aux acheteurs — pas besoin que le propriétaire soit
+  // connecté pour que les nouveautés se fassent connaître. Premier produit
+  // du vendeur = "nouveau vendeur" ; sinon = "nouveau produit" tout court.
+  try {
+    const { rows: countRows } = await pool.query("SELECT COUNT(*)::int AS n FROM products WHERE vendor_phone = $1", [p.vendorPhone]);
+    const isFirstProduct = countRows[0].n <= 1;
+    const message = isFirstProduct
+      ? `🎉 ${p.vendorName} vient de rejoindre Zonako ! Découvre "${p.name}".`
+      : `🆕 Nouveau chez ${p.vendorName} : "${p.name}".`;
+    await pool.query(
+      "UPDATE site_content SET announcement_message = $1, announcement_product_id = $2, announcement_created_at = $3 WHERE id = 1",
+      [message, id, Date.now()]
+    );
+  } catch (e) {
+    console.error("Erreur pendant la génération de l'annonce automatique:", e);
+  }
   const { rows } = await pool.query("SELECT * FROM products WHERE id = $1", [id]);
   res.json(mapProduct(rows[0]));
 });
@@ -1507,6 +1523,9 @@ function mapContent(r) {
     tipCourier: r.tip_courier,
     zones: r.zones || [],
     categories: r.categories || [],
+    announcementMessage: r.announcement_message || "",
+    announcementProductId: r.announcement_product_id || "",
+    announcementCreatedAt: r.announcement_created_at ? Number(r.announcement_created_at) : null,
   };
 }
 
@@ -1531,6 +1550,17 @@ app.put("/api/content", requireOwner, async (req, res) => {
   if (b.zones !== undefined) { sets.push(`zones = $${i++}`); vals.push(JSON.stringify(b.zones)); }
   if (b.categories !== undefined) { sets.push(`categories = $${i++}`); vals.push(JSON.stringify(b.categories)); }
   if (sets.length) await pool.query(`UPDATE site_content SET ${sets.join(", ")} WHERE id = 1`, vals);
+  const { rows } = await pool.query("SELECT * FROM site_content WHERE id = 1");
+  res.json(mapContent(rows[0]));
+});
+
+// Publier ou retirer l'annonce/bannière visible par tous les acheteurs inscrits.
+app.post("/api/content/announcement", requireOwner, async (req, res) => {
+  const { message, productId } = req.body;
+  await pool.query(
+    "UPDATE site_content SET announcement_message = $1, announcement_product_id = $2, announcement_created_at = $3 WHERE id = 1",
+    [message || null, productId || null, message ? Date.now() : null]
+  );
   const { rows } = await pool.query("SELECT * FROM site_content WHERE id = 1");
   res.json(mapContent(rows[0]));
 });
