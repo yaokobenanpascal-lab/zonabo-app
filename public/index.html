@@ -1480,7 +1480,7 @@ function ChangePhoneNumber({ role, info, accentColor, onChanged }) {
   );
 }
 
-function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, registerBuyer, logoutBuyer, placeOrder, cancelOrder, deleteMyOrder, showCart, setShowCart, myOrders, chooseCourierForOrder, confirmDeliveryByBuyer, disputeOrder, proposeTransport, confirmTransport, tip, announcementMessage, announcementProductId, announcementCreatedAt }) {
+function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, registerBuyer, logoutBuyer, placeOrder, cancelOrder, deleteMyOrder, showCart, setShowCart, myOrders, chooseCourierForOrder, confirmDeliveryByBuyer, disputeOrder, proposeTransport, confirmTransport, tip, announcementMessage, announcementProductId, announcementCreatedAt, announcementVideoUrl }) {
   const [category, setCategory] = useState("");
   const [search, setSearch] = useState("");
   const [visibleCount, setVisibleCount] = useState(20);
@@ -1681,7 +1681,11 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
     <div className="max-w-5xl mx-auto px-4 py-6">
       {showAnnouncement && (
         <div className="bg-[#F2A93B]/15 border-2 border-[#F2A93B]/40 rounded-xl px-4 py-3 mb-4 flex items-start gap-3">
-          <span className="text-lg leading-none">📣</span>
+          {announcementVideoUrl ? (
+            <video src={announcementVideoUrl} autoPlay muted loop playsInline className="w-16 h-16 rounded-lg object-cover flex-shrink-0" />
+          ) : (
+            <span className="text-lg leading-none">📣</span>
+          )}
           <div className="flex-1">
             <p className="f-body text-sm text-[#14213D]">{announcementMessage}</p>
             {announcementProduct && (
@@ -1740,7 +1744,9 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
               return (
                 <div key={p.id} className="ticket bg-white border-2 border-[#14213D]/10 overflow-hidden flex flex-col">
                   <div className="h-28 flex items-center justify-center text-4xl bg-[#FBF7F0] overflow-hidden relative cursor-pointer" onClick={() => (p.imageUrl || p.videoUrl) && setGalleryProduct(p)}>
-                    {p.imageUrl ? (
+                    {p.videoUrl ? (
+                      <video src={p.videoUrl} autoPlay muted loop playsInline className="w-full h-full object-cover" />
+                    ) : p.imageUrl ? (
                       <img src={p.imageUrl} alt={p.name} className="w-full h-full object-cover" onError={(e) => { e.target.style.display = "none"; e.target.parentElement.textContent = cat?.emoji || "📦"; }} />
                     ) : (cat?.emoji || "📦")}
                     {p.imageUrls && p.imageUrls.length > 1 && (
@@ -2126,6 +2132,11 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
   const [uploadingImg, setUploadingImg] = useState(false);
   const [uploadingEditImg, setUploadingEditImg] = useState(false);
   const [uploadingVideo, setUploadingVideo] = useState(false);
+  const [liveVideoUrl, setLiveVideoUrl] = useState("");
+  const [liveVideoCaption, setLiveVideoCaption] = useState("");
+  const [uploadingLiveVideo, setUploadingLiveVideo] = useState(false);
+  const [publishingLive, setPublishingLive] = useState(false);
+  const [liveMsg, setLiveMsg] = useState("");
   const [uploadingEditVideo, setUploadingEditVideo] = useState(false);
   const [videoError, setVideoError] = useState("");
   const [landmarkDraft, setLandmarkDraft] = useState(vendorInfo.landmark || "");
@@ -2250,6 +2261,31 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
     if (target === "new") setForm((f) => ({ ...f, videoUrls: f.videoUrls.filter((_, i) => i !== index) }));
     else setEditForm((f) => ({ ...f, videoUrls: (f.videoUrls || []).filter((_, i) => i !== index) }));
   }
+  async function handleLiveVideoUpload(file) {
+    if (!file) return;
+    setLiveMsg("");
+    setUploadingLiveVideo(true);
+    try {
+      const url = await uploadVideoToCloudinary(file);
+      setLiveVideoUrl(url);
+    } catch (e) {
+      setLiveMsg(e.message || "Impossible d'envoyer la vidéo.");
+    }
+    setUploadingLiveVideo(false);
+  }
+  async function publishLiveVideo() {
+    setPublishingLive(true);
+    setLiveMsg("");
+    try {
+      await apiSend(`/api/vendors/${encodeURIComponent(vendorInfo.phone)}/live-announcement`, "POST", { message: liveVideoCaption, videoUrl: liveVideoUrl }, getPhoneToken(vendorInfo.phone));
+      setLiveMsg("✓ Publié ! Visible par tous les acheteurs dès maintenant.");
+      setLiveVideoUrl("");
+      setLiveVideoCaption("");
+    } catch (e) {
+      setLiveMsg(e.message || "Erreur pendant la publication.");
+    }
+    setPublishingLive(false);
+  }
   function saveProfile() {
     registerVendor(profileForm);
     setEditingProfile(false);
@@ -2330,6 +2366,28 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
         <button disabled={savingLandmark} onClick={saveLandmark} className="f-mono text-[11px] bg-[#2D6A4F]/10 text-[#2D6A4F] px-3 py-2 rounded-lg whitespace-nowrap">{savingLandmark ? "…" : "Enregistrer"}</button>
       </div>
       <p className="f-body text-[10px] text-[#14213D]/35 -mt-4 mb-6">Utilisé par défaut sur tes nouveaux produits — visible par le livreur pour te retrouver facilement.</p>
+
+      <div className="ticket bg-[#14213D] p-4 mb-6">
+        <p className="f-mono text-[11px] uppercase tracking-wide text-[#F2A93B] mb-1">🔴 Publier une vidéo en direct</p>
+        <p className="f-body text-xs text-white/60 mb-3">Une courte vidéo (annonce, promo, démo) apparaît immédiatement en bannière chez tous les acheteurs — remplace l'annonce en cours.</p>
+        {liveVideoUrl ? (
+          <div className="relative inline-block mb-2">
+            <video src={liveVideoUrl} controls className="w-40 h-28 rounded-lg object-cover" />
+            <button onClick={() => setLiveVideoUrl("")} className="absolute -top-1.5 -right-1.5 bg-white rounded-full"><X size={12} className="text-[#C1440E]" /></button>
+          </div>
+        ) : (
+          <label className="f-mono text-xs text-center bg-white/10 text-white py-2 rounded-lg cursor-pointer block mb-2">
+            {uploadingLiveVideo ? "Envoi…" : "🎥 Choisir une vidéo"}
+            <input type="file" accept="video/*" className="hidden" onChange={(e) => handleLiveVideoUpload(e.target.files[0])} />
+          </label>
+        )}
+        <input placeholder="Un petit mot pour les acheteurs (facultatif)" value={liveVideoCaption} onChange={(e) => setLiveVideoCaption(e.target.value)} className="f-body w-full px-3 py-2 rounded-lg text-sm mb-2" />
+        {liveMsg && <p className="f-body text-xs text-[#F2A93B] mb-2">{liveMsg}</p>}
+        <button disabled={!liveVideoUrl || publishingLive} onClick={publishLiveVideo} className="w-full f-mono text-xs bg-[#F2A93B] disabled:opacity-40 text-[#14213D] py-2.5 rounded-full">
+          {publishingLive ? "…" : "Publier maintenant"}
+        </button>
+      </div>
+
       {tip && (
         <div className="mb-6 f-body text-sm bg-[#2D6A4F]/10 text-[#14213D] border-2 border-[#2D6A4F]/20 rounded-xl px-4 py-3">
           💡 {tip}
@@ -4144,7 +4202,7 @@ function App() {
               myOrders={myOrders} chooseCourierForOrder={chooseCourierForOrder} confirmDeliveryByBuyer={confirmDeliveryByBuyer} disputeOrder={disputeOrder}
               proposeTransport={proposeTransport} confirmTransport={confirmTransport}
               tip={siteContent.tipBuyer}
-              announcementMessage={siteContent.announcementMessage} announcementProductId={siteContent.announcementProductId} announcementCreatedAt={siteContent.announcementCreatedAt}
+              announcementMessage={siteContent.announcementMessage} announcementProductId={siteContent.announcementProductId} announcementCreatedAt={siteContent.announcementCreatedAt} announcementVideoUrl={siteContent.announcementVideoUrl}
             />
           )}
           {role === "vendor" && (
