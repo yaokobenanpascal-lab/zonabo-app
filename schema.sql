@@ -134,6 +134,16 @@ CREATE TABLE IF NOT EXISTS site_content (
 
 INSERT INTO site_content (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 
+-- Annonce/bannière que le propriétaire peut publier pour tous les acheteurs
+-- inscrits (nouveau vendeur, nouveau produit...) — une seule à la fois,
+-- affichée jusqu'à ce que l'acheteur la ferme ou qu'une nouvelle la remplace.
+ALTER TABLE site_content ADD COLUMN IF NOT EXISTS announcement_message TEXT;
+ALTER TABLE site_content ADD COLUMN IF NOT EXISTS announcement_product_id TEXT;
+ALTER TABLE site_content ADD COLUMN IF NOT EXISTS announcement_created_at BIGINT;
+-- Vidéo courte "en direct" qu'un vendeur peut pousser lui-même dans la
+-- bannière — permet une pub vidéo rapide sans vrai streaming en temps réel.
+ALTER TABLE site_content ADD COLUMN IF NOT EXISTS announcement_video_url TEXT;
+
 -- Migration pour les bases déjà existantes.
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS refund_status TEXT NOT NULL DEFAULT 'none'; -- none | pending | done
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT false;
