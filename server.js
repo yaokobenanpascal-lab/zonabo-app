@@ -9,6 +9,10 @@ const crypto = require("crypto");
 const { Pool } = require("pg");
 
 const app = express();
+// Nécessaire derrière le proxy de Render pour que req.ip renvoie la vraie
+// adresse du visiteur (pas celle du proxy) — utilisé pour le blocage anti
+// force-brute sur la connexion propriétaire.
+app.set("trust proxy", true);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // CinetPay envoie sa notification en POST classique (formulaire), pas en JSON
 
@@ -1608,10 +1612,29 @@ app.post("/api/cinetpay/notify", async (req, res) => {
 });
 
 // ==================== AUTH PROPRIÉTAIRE ====================
+// Protection contre les tentatives répétées (force brute) : après 5 essais
+// échoués depuis la même IP, blocage temporaire de 15 minutes.
+const ownerLoginAttempts = new Map(); // ip -> { count, blockedUntil }
+const OWNER_LOGIN_MAX_ATTEMPTS = 5;
+const OWNER_LOGIN_BLOCK_MS = 15 * 60 * 1000;
 app.post("/api/owner/login", async (req, res) => {
+  const ip = req.ip || req.headers["x-forwarded-for"] || "unknown";
+  const attempt = ownerLoginAttempts.get(ip);
+  if (attempt && attempt.blockedUntil && Date.now() < attempt.blockedUntil) {
+    const remainingMin = Math.ceil((attempt.blockedUntil - Date.now()) / 60000);
+    return res.status(429).json({ error: `Trop de tentatives. Réessaie dans ${remainingMin} minute(s).` });
+  }
   const { code } = req.body;
   if (!OWNER_PASSCODE) return res.status(500).json({ error: "OWNER_PASSCODE non configuré sur le serveur." });
-  if (code !== OWNER_PASSCODE) return res.status(401).json({ error: "Code incorrect." });
+  if (code !== OWNER_PASSCODE) {
+    const count = (attempt?.count || 0) + 1;
+    ownerLoginAttempts.set(ip, {
+      count,
+      blockedUntil: count >= OWNER_LOGIN_MAX_ATTEMPTS ? Date.now() + OWNER_LOGIN_BLOCK_MS : null,
+    });
+    return res.status(401).json({ error: "Code incorrect." });
+  }
+  ownerLoginAttempts.delete(ip); // succès : on efface le compteur
   res.json({ token: await issueOwnerToken() });
 });
 
