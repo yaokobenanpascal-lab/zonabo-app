@@ -1440,11 +1440,23 @@ function ChangePhoneNumber({ role, info, accentColor, onChanged }) {
   );
 }
 
-function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, registerBuyer, logoutBuyer, placeOrder, cancelOrder, deleteMyOrder, showCart, setShowCart, myOrders, chooseCourierForOrder, confirmDeliveryByBuyer, disputeOrder, proposeTransport, confirmTransport, tip }) {
+function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, registerBuyer, logoutBuyer, placeOrder, cancelOrder, deleteMyOrder, showCart, setShowCart, myOrders, chooseCourierForOrder, confirmDeliveryByBuyer, disputeOrder, proposeTransport, confirmTransport, tip, announcementMessage, announcementProductId, announcementCreatedAt }) {
   const [category, setCategory] = useState("");
   const [search, setSearch] = useState("");
   const [visibleCount, setVisibleCount] = useState(20);
   const [galleryProduct, setGalleryProduct] = useState(null);
+  // Mémorise la dernière annonce fermée par l'acheteur (sur cet appareil) —
+  // si le propriétaire publie une nouvelle annonce, elle réapparaît quand
+  // même puisque son horodatage est différent.
+  const [dismissedAnnouncementAt, setDismissedAnnouncementAt] = useState(() => {
+    try { return Number(localStorage.getItem("zonako_dismissed_announcement") || 0); } catch { return 0; }
+  });
+  function dismissAnnouncement() {
+    setDismissedAnnouncementAt(announcementCreatedAt);
+    try { localStorage.setItem("zonako_dismissed_announcement", String(announcementCreatedAt)); } catch {}
+  }
+  const showAnnouncement = announcementMessage && announcementCreatedAt && announcementCreatedAt !== dismissedAnnouncementAt;
+  const announcementProduct = announcementProductId ? products.find((p) => p.id === announcementProductId) : null;
   const [receiptOrder, setReceiptOrder] = useState(null);
   const [view, setView] = useState("browse"); // browse | orders
 
@@ -1627,6 +1639,18 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-6">
+      {showAnnouncement && (
+        <div className="bg-[#F2A93B]/15 border-2 border-[#F2A93B]/40 rounded-xl px-4 py-3 mb-4 flex items-start gap-3">
+          <span className="text-lg leading-none">📣</span>
+          <div className="flex-1">
+            <p className="f-body text-sm text-[#14213D]">{announcementMessage}</p>
+            {announcementProduct && (
+              <button onClick={() => setGalleryProduct(announcementProduct)} className="f-mono text-xs text-[#14213D] underline mt-1">Voir le produit →</button>
+            )}
+          </div>
+          <button onClick={dismissAnnouncement} className="f-mono text-xs text-[#14213D]/40 hover:text-[#14213D]">✕</button>
+        </div>
+      )}
       <div className="flex items-center justify-between mb-5">
         <div className="flex items-center gap-2">
           <button onClick={() => setView("browse")} className={`f-mono text-xs px-3 py-1.5 rounded-full ${view === "browse" ? "bg-[#14213D] text-white" : "bg-[#14213D]/5 text-[#14213D]/60"}`}>Parcourir</button>
@@ -2901,7 +2925,7 @@ function CourierView({ courierInfo, registerCourier, logoutCourier, orders, subm
   );
 }
 
-function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updateAccessSettings, ownerPayoutInfo, updateOwnerPayoutInfo, ownerToken, setOwnerToken, siteContent, updateContent }) {
+function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updateAccessSettings, ownerPayoutInfo, updateOwnerPayoutInfo, ownerToken, setOwnerToken, siteContent, updateContent, publishAnnouncement, products }) {
   const [code, setCode] = useState("");
   const [rateInput, setRateInput] = useState(String(Math.round(feeRate * 100)));
   const [accessFeeInput, setAccessFeeInput] = useState(String(accessFee));
@@ -3024,6 +3048,10 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
   const [notes, setNotes] = useState([]);
   const [showNotes, setShowNotes] = useState(false);
   const [disputes, setDisputes] = useState([]);
+  const [announcementDraft, setAnnouncementDraft] = useState("");
+  const [announcementProductId, setAnnouncementProductId] = useState("");
+  const [announcementBusy, setAnnouncementBusy] = useState(false);
+  useEffect(() => { setAnnouncementDraft(siteContent.announcementMessage || ""); setAnnouncementProductId(siteContent.announcementProductId || ""); }, [siteContent.announcementMessage]);
   const [buyerRisk, setBuyerRisk] = useState([]);
 
   async function loadBuyerRisk() {
@@ -3498,6 +3526,36 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
       </div>
 
       <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
+        <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-1">📣 Annonce à tous les acheteurs</p>
+        <p className="f-body text-xs text-[#14213D]/50 mb-3">Se publie <strong>automatiquement</strong> à chaque nouveau vendeur ou nouveau produit — pas besoin d'être connecté. Écris ici seulement si tu veux annoncer autre chose toi-même (ça remplace l'annonce automatique jusqu'à la prochaine nouveauté).</p>
+        <textarea placeholder="Ex : Un nouveau vendeur d'électronique vient de rejoindre Zonako à Abengourou ! 🎉" value={announcementDraft} onChange={(e) => setAnnouncementDraft(e.target.value)} rows={2} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm mb-2" />
+        <select value={announcementProductId} onChange={(e) => setAnnouncementProductId(e.target.value)} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm bg-white mb-2">
+          <option value="">Sans lien vers un produit précis</option>
+          {products.slice(0, 100).map((p) => (
+            <option key={p.id} value={p.id}>{p.name} — {p.vendorName}</option>
+          ))}
+        </select>
+        <div className="flex gap-2">
+          <button
+            disabled={announcementBusy || !announcementDraft.trim()}
+            onClick={async () => { setAnnouncementBusy(true); await publishAnnouncement(announcementDraft.trim(), announcementProductId || null); setAnnouncementBusy(false); }}
+            className="flex-1 f-mono text-xs bg-[#F2A93B] text-[#14213D] disabled:opacity-40 py-2.5 rounded-full"
+          >
+            {announcementBusy ? "…" : siteContent.announcementMessage ? "Mettre à jour l'annonce" : "Publier l'annonce"}
+          </button>
+          {siteContent.announcementMessage && (
+            <button
+              disabled={announcementBusy}
+              onClick={async () => { setAnnouncementBusy(true); setAnnouncementDraft(""); setAnnouncementProductId(""); await publishAnnouncement("", null); setAnnouncementBusy(false); }}
+              className="flex-1 f-mono text-xs bg-[#14213D]/10 text-[#14213D] py-2.5 rounded-full"
+            >
+              Retirer l'annonce
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
         <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-3">Contenu de la plateforme</p>
         <p className="f-body text-xs text-[#14213D]/50 mb-4">
           Modifie les textes, les zones et les catégories directement ici — les changements sont visibles par tout le monde en quelques secondes, sans passer par GitHub ni redéployer.
@@ -3901,6 +3959,12 @@ function App() {
     if (Array.isArray(c.zones) && c.zones.length) { ZONES.length = 0; ZONES.push(...c.zones); }
     if (Array.isArray(c.categories) && c.categories.length) { CATEGORIES.length = 0; CATEGORIES.push(...c.categories); }
   }
+  // Publie (ou retire, si message vide) l'annonce visible par tous les
+  // acheteurs inscrits — nouveau vendeur, nouveau produit, etc.
+  async function publishAnnouncement(message, productId) {
+    const c = await apiSend("/api/content/announcement", "POST", { message, productId }, ownerToken);
+    setSiteContent(c);
+  }
 
   useEffect(() => { refresh(); }, [refresh]);
   useEffect(() => {
@@ -4033,6 +4097,7 @@ function App() {
               myOrders={myOrders} chooseCourierForOrder={chooseCourierForOrder} confirmDeliveryByBuyer={confirmDeliveryByBuyer} disputeOrder={disputeOrder}
               proposeTransport={proposeTransport} confirmTransport={confirmTransport}
               tip={siteContent.tipBuyer}
+              announcementMessage={siteContent.announcementMessage} announcementProductId={siteContent.announcementProductId} announcementCreatedAt={siteContent.announcementCreatedAt}
             />
           )}
           {role === "vendor" && (
@@ -4053,7 +4118,7 @@ function App() {
             />
           )}
           {role === "owner" && (
-            <OwnerView orders={orders} feeRate={feeRate} updateFeeRate={updateFeeRate} accessFee={accessFee} trialDays={trialDays} updateAccessSettings={updateAccessSettings} ownerPayoutInfo={ownerPayoutInfo} updateOwnerPayoutInfo={updateOwnerPayoutInfo} ownerToken={ownerToken} setOwnerToken={setOwnerToken} siteContent={siteContent} updateContent={updateContent} />
+            <OwnerView orders={orders} feeRate={feeRate} updateFeeRate={updateFeeRate} accessFee={accessFee} trialDays={trialDays} updateAccessSettings={updateAccessSettings} ownerPayoutInfo={ownerPayoutInfo} updateOwnerPayoutInfo={updateOwnerPayoutInfo} ownerToken={ownerToken} setOwnerToken={setOwnerToken} siteContent={siteContent} updateContent={updateContent} publishAnnouncement={publishAnnouncement} products={products} />
           )}
         </>
       )}
