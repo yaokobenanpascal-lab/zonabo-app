@@ -921,6 +921,29 @@ function PaymentBadges() {
 // peut annuler librement pendant ce temps, le vendeur n'a pas encore le
 // droit de confirmer. Affiche un compte à rebours en direct.
 const ORDER_GRACE_PERIOD_MS_CLIENT = 10 * 60 * 1000;
+// Vidéo de la bannière d'annonce — se lance en boucle, coupée par défaut
+// (obligatoire pour l'autoplay dans tous les navigateurs), avec un bouton
+// 🔊 pour activer le son en un seul geste, comme sur Instagram/TikTok.
+function AnnouncementVideoThumb({ src }) {
+  const videoRef = useRef(null);
+  const [muted, setMuted] = useState(true);
+  function toggleSound() {
+    setMuted((m) => {
+      const next = !m;
+      if (videoRef.current) videoRef.current.muted = next;
+      return next;
+    });
+  }
+  return (
+    <div className="relative w-16 h-16 flex-shrink-0">
+      <video ref={videoRef} src={src} autoPlay muted loop playsInline className="w-16 h-16 rounded-lg object-cover" />
+      <button onClick={toggleSound} className="absolute bottom-0.5 right-0.5 bg-black/60 text-white rounded-full w-5 h-5 flex items-center justify-center text-[10px]">
+        {muted ? "🔇" : "🔊"}
+      </button>
+    </div>
+  );
+}
+
 function GracePeriodNotice({ createdAt }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -1682,7 +1705,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
       {showAnnouncement && (
         <div className="bg-[#F2A93B]/15 border-2 border-[#F2A93B]/40 rounded-xl px-4 py-3 mb-4 flex items-start gap-3">
           {announcementVideoUrl ? (
-            <video src={announcementVideoUrl} autoPlay muted loop playsInline className="w-16 h-16 rounded-lg object-cover flex-shrink-0" />
+            <AnnouncementVideoThumb src={announcementVideoUrl} />
           ) : (
             <span className="text-lg leading-none">📣</span>
           )}
