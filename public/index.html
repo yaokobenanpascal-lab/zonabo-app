@@ -136,6 +136,44 @@ const CATEGORIES = [
   { name: "Services", emoji: "🔧" },
 ];
 
+// Dictionnaire mots-clés → emoji, pour deviner automatiquement l'emoji d'une
+// catégorie à partir de son nom (le propriétaire n'a plus qu'à taper le nom).
+// Ordre important : les mots-clés les plus spécifiques d'abord.
+const CATEGORY_EMOJI_KEYWORDS = [
+  [["téléphone", "smartphone", "phone", "mobile"], "📱"],
+  [["ordinateur", "informatique", "pc", "laptop"], "💻"],
+  [["électronique", "electronique", "électroménager", "tv", "télé"], "🔌"],
+  [["chaussure", "sandale", "basket"], "👟"],
+  [["sac", "bagage", "valise"], "👜"],
+  [["bijou", "bijoux", "montre", "accessoire"], "💍"],
+  [["vêtement", "vetement", "mode", "habit", "tissu", "pagne"], "👗"],
+  [["beauté", "beaute", "cosmétique", "cosmetique", "maquillage"], "💄"],
+  [["santé", "sante", "pharmacie", "médicament", "medicament"], "💊"],
+  [["aliment", "nourriture", "épicerie", "epicerie", "riz", "vivres"], "🍚"],
+  [["boisson", "jus", "eau"], "🥤"],
+  [["fruit", "légume", "legume", "maraîcher", "maraicher"], "🥭"],
+  [["viande", "poisson", "boucherie"], "🥩"],
+  [["maison", "déco", "deco", "meuble", "mobilier"], "🛋️"],
+  [["cuisine", "ustensile", "vaisselle"], "🍳"],
+  [["jardin", "agricole", "agriculture", "outil"], "🌱"],
+  [["bricolage", "quincaillerie", "matériel", "materiel"], "🔧"],
+  [["auto", "voiture", "moto", "pièce", "piece", "mécanique", "mecanique"], "🚗"],
+  [["bébé", "bebe", "enfant", "jouet"], "🧸"],
+  [["livre", "papeterie", "fourniture", "école", "ecole"], "📚"],
+  [["sport", "fitness", "musculation"], "⚽"],
+  [["service", "réparation", "reparation", "prestation"], "🔧"],
+  [["coiffure", "coiffeur", "salon"], "💇"],
+  [["art", "artisanat", "décoration", "decoration"], "🎨"],
+  [["animal", "animaux", "vétérinaire", "veterinaire"], "🐾"],
+];
+function guessCategoryEmoji(name) {
+  const lower = (name || "").toLowerCase();
+  for (const [keywords, emoji] of CATEGORY_EMOJI_KEYWORDS) {
+    if (keywords.some((k) => lower.includes(k))) return emoji;
+  }
+  return "📦"; // par défaut si aucun mot-clé ne correspond
+}
+
 const FONT_STYLE = `
   @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap');
   .f-display { font-family: 'Space Grotesk', sans-serif; }
@@ -2959,7 +2997,7 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
         tipVendor: siteContent.tipVendor || "",
         tipCourier: siteContent.tipCourier || "",
         zonesText: (siteContent.zones && siteContent.zones.length ? siteContent.zones : ZONES).join("\n"),
-        categoriesText: (siteContent.categories && siteContent.categories.length ? siteContent.categories : CATEGORIES).map((c) => `${c.emoji} ${c.name}`).join("\n"),
+        categoriesText: (siteContent.categories && siteContent.categories.length ? siteContent.categories : CATEGORIES).map((c) => c.name).join("\n"),
       });
       setContentLoaded(true);
     }
@@ -2970,10 +3008,10 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
     setContentMsg("");
     try {
       const zones = contentForm.zonesText.split("\n").map((s) => s.trim()).filter(Boolean);
-      const categories = contentForm.categoriesText.split("\n").map((s) => s.trim()).filter(Boolean).map((line) => {
-        const [emoji, ...rest] = line.split(" ");
-        return { emoji, name: rest.join(" ") || emoji };
-      });
+      const categories = contentForm.categoriesText.split("\n").map((s) => s.trim()).filter(Boolean).map((name) => ({
+        name,
+        emoji: guessCategoryEmoji(name),
+      }));
       await updateContent({
         homeHeadline: contentForm.homeHeadline,
         homeSubheadline: contentForm.homeSubheadline,
@@ -3578,8 +3616,15 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
         <p className="f-mono text-[10px] uppercase tracking-wide text-[#14213D]/40 mb-1.5 mt-4">Zones (une par ligne)</p>
         <textarea rows={5} value={contentForm.zonesText} onChange={(e) => setContentForm({ ...contentForm, zonesText: e.target.value })} className="f-mono w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-xs" />
 
-        <p className="f-mono text-[10px] uppercase tracking-wide text-[#14213D]/40 mb-1.5 mt-4">Catégories de produits (une par ligne, format : emoji nom — ex : 🍚 Alimentation)</p>
+        <p className="f-mono text-[10px] uppercase tracking-wide text-[#14213D]/40 mb-1.5 mt-4">Catégories de produits (un nom par ligne — l'emoji est deviné automatiquement)</p>
         <textarea rows={5} value={contentForm.categoriesText} onChange={(e) => setContentForm({ ...contentForm, categoriesText: e.target.value })} className="f-mono w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-xs" />
+        {contentForm.categoriesText.trim() && (
+          <div className="flex flex-wrap gap-1.5 mt-1.5">
+            {contentForm.categoriesText.split("\n").map((s) => s.trim()).filter(Boolean).map((name, i) => (
+              <span key={i} className="f-mono text-[10px] bg-[#14213D]/5 text-[#14213D]/60 px-2 py-1 rounded-full">{guessCategoryEmoji(name)} {name}</span>
+            ))}
+          </div>
+        )}
 
         {contentMsg && <p className={`f-body text-xs mt-3 ${contentMsg.startsWith("Erreur") ? "text-[#C1440E]" : "text-[#2D6A4F]"}`}>{contentMsg}</p>}
         <button disabled={contentSaving} onClick={saveContent} className="w-full mt-4 f-mono text-xs bg-[#14213D] disabled:opacity-40 text-white py-2.5 rounded-full">
