@@ -341,3 +341,48 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS transport_settled_at BIGINT;
 -- (pas un vrai clic de l'acheteur), affiché pour rester transparent.
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS in_transit_at BIGINT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS auto_confirmed BOOLEAN NOT NULL DEFAULT false;
+
+-- ==================== NOTIFICATIONS COMPORTEMENTALES (EMAIL) ====================
+-- Nécessite que l'acheteur se soit inscrit par email (le seul canal fiable
+-- actuellement — SMS bloqué tant que Twilio/Africa's Talking ne sont pas actifs).
+
+-- Favoris : produits qu'un acheteur a mis de côté. last_known_price sert à
+-- détecter une baisse de prix sans notifier deux fois pour la même baisse.
+CREATE TABLE IF NOT EXISTS favorites (
+  buyer_phone TEXT NOT NULL,
+  product_id TEXT NOT NULL,
+  last_known_price NUMERIC,
+  created_at BIGINT NOT NULL,
+  PRIMARY KEY (buyer_phone, product_id)
+);
+
+-- Historique de vues : pour relancer un acheteur qui a regardé un produit
+-- sans jamais commander. "reminded" évite de relancer plusieurs fois pour la
+-- même vue.
+CREATE TABLE IF NOT EXISTS product_views (
+  id TEXT PRIMARY KEY,
+  buyer_phone TEXT NOT NULL,
+  product_id TEXT NOT NULL,
+  viewed_at BIGINT NOT NULL,
+  reminded BOOLEAN NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS idx_product_views_buyer ON product_views(buyer_phone);
+
+-- Suivi de catégories : l'acheteur veut être notifié des nouveautés dans une catégorie.
+CREATE TABLE IF NOT EXISTS category_follows (
+  buyer_phone TEXT NOT NULL,
+  category TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  PRIMARY KEY (buyer_phone, category)
+);
+
+-- Historique des notifications envoyées — sert d'anti-spam (pas plus d'une
+-- notif d'un même type par acheteur toutes les 24h).
+CREATE TABLE IF NOT EXISTS notification_log (
+  id TEXT PRIMARY KEY,
+  buyer_phone TEXT NOT NULL,
+  type TEXT NOT NULL, -- 'view_reminder' | 'price_drop' | 'category_new_product'
+  reference_id TEXT,
+  sent_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notif_log_buyer_type ON notification_log(buyer_phone, type, sent_at);
