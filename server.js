@@ -63,21 +63,28 @@ const EMAIL_CONFIGURED = BREVO_API_KEY && BREVO_FROM_EMAIL;
 if (!EMAIL_CONFIGURED) {
   console.warn("⚠️  Brevo non configuré (BREVO_API_KEY/BREVO_FROM_EMAIL) — les codes envoyés par email s'afficheront dans les logs du serveur (mode test).");
 }
-async function sendEmailCode(email, code) {
+async function sendEmail(to, subject, textContent) {
+  if (!EMAIL_CONFIGURED) {
+    console.log(`[MODE TEST — pas de Brevo configuré] Email à ${to} — "${subject}" : ${textContent}`);
+    return;
+  }
   const r = await fetch("https://api.brevo.com/v3/smtp/email", {
     method: "POST",
     headers: { "Content-Type": "application/json", "api-key": BREVO_API_KEY },
     body: JSON.stringify({
       sender: { email: BREVO_FROM_EMAIL, name: "Zonako" },
-      to: [{ email }],
-      subject: "Ton code de vérification Zonako",
-      textContent: `Ton code de vérification Zonako est : ${code}\n\nIl est valable 10 minutes.`,
+      to: [{ email: to }],
+      subject,
+      textContent,
     }),
   });
   if (!r.ok) {
     const detail = await r.text().catch(() => "");
     throw new Error(`Brevo a répondu ${r.status} : ${detail}`);
   }
+}
+async function sendEmailCode(email, code) {
+  await sendEmail(email, "Ton code de vérification Zonako", `Ton code de vérification Zonako est : ${code}\n\nIl est valable 10 minutes.`);
 }
 
 const pool = new Pool({
@@ -437,6 +444,9 @@ app.post("/api/products", requirePhone((req) => req.body.vendorPhone), async (re
   } catch (e) {
     console.error("Erreur pendant la génération de l'annonce automatique:", e);
   }
+  // Notifie par email les acheteurs qui suivent cette catégorie — ne bloque
+  // pas la réponse (peut concerner plusieurs personnes à la fois).
+  notifyCategoryFollowers(p.category, id, p.name, p.vendorName);
   const { rows } = await pool.query("SELECT * FROM products WHERE id = $1", [id]);
   res.json(mapProduct(rows[0]));
 });
@@ -1693,6 +1703,135 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: "Erreur serveur. Réessaie dans un instant." });
 });
 
+// ==================== NOTIFICATIONS COMPORTEMENTALES (EMAIL) ====================
+// Fonctionne uniquement par email (via Brevo, déjà configuré) — pour les
+// acheteurs inscrits par téléphone, pas de notification tant que le SMS
+// n'est pas actif (Twilio bloqué / Africa's Talking pas encore configuré).
+function looksLikeEmail(identifier) {
+  return typeof identifier === "string" && identifier.includes("@");
+}
+// Anti-spam : pas plus d'une notification d'un type donné par acheteur toutes les 24h.
+async function canNotify(buyerPhone, type) {
+  const { rows } = await pool.query(
+    "SELECT 1 FROM notification_log WHERE buyer_phone = $1 AND type = $2 AND sent_at > $3 LIMIT 1",
+    [buyerPhone, type, Date.now() - 24 * 60 * 60 * 1000]
+  );
+  return rows.length === 0;
+}
+async function logNotification(buyerPhone, type, referenceId) {
+  await pool.query(
+    "INSERT INTO notification_log (id, buyer_phone, type, reference_id, sent_at) VALUES ($1,$2,$3,$4,$5)",
+    [uid(), buyerPhone, type, referenceId || null, Date.now()]
+  );
+}
+
+// Marque qu'un acheteur a vu un produit — utilisé plus tard pour la relance.
+app.post("/api/products/:id/view", async (req, res) => {
+  const tokenPhone = await getTokenPhone(req);
+  if (!tokenPhone) return res.json({ ok: true }); // navigation anonyme : rien à suivre, pas une erreur
+  await pool.query(
+    "INSERT INTO product_views (id, buyer_phone, product_id, viewed_at) VALUES ($1,$2,$3,$4)",
+    [uid(), tokenPhone, req.params.id, Date.now()]
+  );
+  res.json({ ok: true });
+});
+
+// ---- Favoris ----
+app.get("/api/favorites/:phone", requirePhone((req) => req.params.phone), async (req, res) => {
+  const { rows } = await pool.query("SELECT product_id FROM favorites WHERE buyer_phone = $1", [req.params.phone]);
+  res.json(rows.map((r) => r.product_id));
+});
+app.post("/api/favorites", requirePhone((req) => req.body.phone), async (req, res) => {
+  const { phone, productId } = req.body;
+  const { rows } = await pool.query("SELECT price FROM products WHERE id = $1", [productId]);
+  if (!rows[0]) return res.status(404).json({ error: "Produit introuvable." });
+  await pool.query(
+    "INSERT INTO favorites (buyer_phone, product_id, last_known_price, created_at) VALUES ($1,$2,$3,$4) ON CONFLICT (buyer_phone, product_id) DO NOTHING",
+    [phone, productId, rows[0].price, Date.now()]
+  );
+  res.json({ ok: true });
+});
+app.delete("/api/favorites/:productId", requirePhone((req) => req.body.phone), async (req, res) => {
+  await pool.query("DELETE FROM favorites WHERE buyer_phone = $1 AND product_id = $2", [req.body.phone, req.params.productId]);
+  res.json({ ok: true });
+});
+
+// ---- Suivi de catégories ----
+app.get("/api/category-follows/:phone", requirePhone((req) => req.params.phone), async (req, res) => {
+  const { rows } = await pool.query("SELECT category FROM category_follows WHERE buyer_phone = $1", [req.params.phone]);
+  res.json(rows.map((r) => r.category));
+});
+app.post("/api/category-follows", requirePhone((req) => req.body.phone), async (req, res) => {
+  const { phone, category } = req.body;
+  await pool.query(
+    "INSERT INTO category_follows (buyer_phone, category, created_at) VALUES ($1,$2,$3) ON CONFLICT (buyer_phone, category) DO NOTHING",
+    [phone, category, Date.now()]
+  );
+  res.json({ ok: true });
+});
+app.delete("/api/category-follows/:category", requirePhone((req) => req.body.phone), async (req, res) => {
+  await pool.query("DELETE FROM category_follows WHERE buyer_phone = $1 AND category = $2", [req.body.phone, req.params.category]);
+  res.json({ ok: true });
+});
+
+// Vérifie toutes les heures : relances "vu mais pas acheté" (3 jours) et
+// baisses de prix sur les favoris. Le suivi de catégorie, lui, est
+// déclenché directement à la publication d'un produit (pas besoin d'attendre).
+const VIEW_REMINDER_DELAY_MS = 3 * 24 * 60 * 60 * 1000; // 3 jours
+async function processFavoritesAndViewReminders() {
+  try {
+    // Relance "vu mais pas acheté"
+    const { rows: staleViews } = await pool.query(
+      `SELECT v.id, v.buyer_phone, v.product_id, p.name, p.price
+       FROM product_views v JOIN products p ON p.id = v.product_id
+       WHERE v.reminded = false AND v.viewed_at < $1`,
+      [Date.now() - VIEW_REMINDER_DELAY_MS]
+    );
+    for (const v of staleViews) {
+      await pool.query("UPDATE product_views SET reminded = true WHERE id = $1", [v.id]);
+      if (!looksLikeEmail(v.buyer_phone)) continue;
+      const { rows: alreadyOrdered } = await pool.query(
+        "SELECT 1 FROM orders WHERE buyer_phone = $1 AND items @> $2::jsonb LIMIT 1",
+        [v.buyer_phone, JSON.stringify([{ id: v.product_id }])]
+      );
+      if (alreadyOrdered.length) continue;
+      if (!(await canNotify(v.buyer_phone, "view_reminder"))) continue;
+      await sendEmail(v.buyer_phone, `Toujours envie de "${v.name}" ?`, `Tu as regardé "${v.name}" (${Number(v.price).toLocaleString("fr-FR")} F) sur Zonako il y a quelques jours — il est toujours disponible si tu veux le commander.\n\nzonabo-app.onrender.com`);
+      await logNotification(v.buyer_phone, "view_reminder", v.product_id);
+    }
+    // Baisse de prix sur un favori
+    const { rows: favs } = await pool.query(
+      `SELECT f.buyer_phone, f.product_id, f.last_known_price, p.name, p.price
+       FROM favorites f JOIN products p ON p.id = f.product_id
+       WHERE p.price < f.last_known_price`
+    );
+    for (const f of favs) {
+      await pool.query("UPDATE favorites SET last_known_price = $1 WHERE buyer_phone = $2 AND product_id = $3", [f.price, f.buyer_phone, f.product_id]);
+      if (!looksLikeEmail(f.buyer_phone)) continue;
+      if (!(await canNotify(f.buyer_phone, "price_drop"))) continue;
+      await sendEmail(f.buyer_phone, `Baisse de prix sur "${f.name}" !`, `Bonne nouvelle : "${f.name}" est passé de ${Number(f.last_known_price).toLocaleString("fr-FR")} F à ${Number(f.price).toLocaleString("fr-FR")} F sur Zonako.\n\nzonabo-app.onrender.com`);
+      await logNotification(f.buyer_phone, "price_drop", f.product_id);
+    }
+  } catch (e) {
+    console.error("Erreur pendant les notifications comportementales:", e);
+  }
+}
+
+// Nouveauté dans une catégorie suivie — déclenché directement à la publication.
+async function notifyCategoryFollowers(category, productId, productName, vendorName) {
+  try {
+    const { rows: followers } = await pool.query("SELECT buyer_phone FROM category_follows WHERE category = $1", [category]);
+    for (const f of followers) {
+      if (!looksLikeEmail(f.buyer_phone)) continue;
+      if (!(await canNotify(f.buyer_phone, "category_new_product"))) continue;
+      await sendEmail(f.buyer_phone, `Nouveau dans ${category} sur Zonako`, `${vendorName} vient de publier "${productName}" dans la catégorie ${category} que tu suis.\n\nzonabo-app.onrender.com`);
+      await logNotification(f.buyer_phone, "category_new_product", productId);
+    }
+  } catch (e) {
+    console.error("Erreur pendant la notification de suivi de catégorie:", e);
+  }
+}
+
 // ==================== Frontend statique ====================
 app.use(express.static(path.join(__dirname, "public")));
 app.get("*", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
@@ -1705,4 +1844,7 @@ ensureSchema().then(() => {
   // Vérifie toutes les heures s'il y a des livraisons à confirmer automatiquement.
   autoConfirmStaleDeliveries();
   setInterval(autoConfirmStaleDeliveries, 60 * 60 * 1000);
+  // Vérifie toutes les heures les relances "vu mais pas acheté" et baisses de prix.
+  processFavoritesAndViewReminders();
+  setInterval(processFavoritesAndViewReminders, 60 * 60 * 1000);
 });
