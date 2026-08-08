@@ -537,7 +537,7 @@ function VendorTrustBadge({ phone }) {
 const VEHICLE_LABELS = { moto: "🏍️ Moto", velo: "🚲 Vélo", voiture: "🚗 Voiture", tricycle: "🛺 Tricycle", pied: "🚶 À pied" };
 // Galerie photo d'un produit — s'ouvre en plein écran, navigation par flèches
 // ou par points, pour montrer plusieurs angles d'un même article.
-function ProductGalleryModal({ product, onClose }) {
+function ProductGalleryModal({ product, onClose, buyerPhone }) {
   const [index, setIndex] = useState(0);
   const [buyerPhotos, setBuyerPhotos] = useState([]);
   const photos = product.imageUrls && product.imageUrls.length ? product.imageUrls : (product.imageUrl ? [product.imageUrl] : []);
@@ -546,6 +546,10 @@ function ProductGalleryModal({ product, onClose }) {
     if (!product.vendorPhone) return;
     apiGet(`/api/ratings/${encodeURIComponent(product.vendorPhone)}/photos`).then(setBuyerPhotos).catch(() => {});
   }, [product.vendorPhone]);
+  useEffect(() => {
+    if (!buyerPhone) return;
+    apiSend(`/api/products/${product.id}/view`, "POST", undefined, getPhoneToken(buyerPhone)).catch(() => {});
+  }, [product.id, buyerPhone]);
   // Les vidéos passent en premier (plus convaincantes), suivies des photos du
   // vendeur, puis des vraies photos envoyées par d'anciens acheteurs (preuve
   // de conformité — ce que les gens reçoivent vraiment).
@@ -1508,6 +1512,37 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
   const [search, setSearch] = useState("");
   const [visibleCount, setVisibleCount] = useState(20);
   const [galleryProduct, setGalleryProduct] = useState(null);
+  const [favorites, setFavorites] = useState([]);
+  const [followedCategories, setFollowedCategories] = useState([]);
+  useEffect(() => {
+    if (!buyerInfo.phone) return;
+    const token = getPhoneToken(buyerInfo.phone);
+    if (!token) return;
+    apiSend(`/api/favorites/${encodeURIComponent(buyerInfo.phone)}`, "GET", undefined, token).then(setFavorites).catch(() => {});
+    apiSend(`/api/category-follows/${encodeURIComponent(buyerInfo.phone)}`, "GET", undefined, token).then(setFollowedCategories).catch(() => {});
+  }, [buyerInfo.phone]);
+  async function toggleFavorite(productId) {
+    const token = getPhoneToken(buyerInfo.phone);
+    if (!token) return;
+    if (favorites.includes(productId)) {
+      setFavorites((f) => f.filter((id) => id !== productId));
+      await apiSend(`/api/favorites/${productId}`, "DELETE", { phone: buyerInfo.phone }, token).catch(() => {});
+    } else {
+      setFavorites((f) => [...f, productId]);
+      await apiSend("/api/favorites", "POST", { phone: buyerInfo.phone, productId }, token).catch(() => {});
+    }
+  }
+  async function toggleCategoryFollow(category) {
+    const token = getPhoneToken(buyerInfo.phone);
+    if (!token) return;
+    if (followedCategories.includes(category)) {
+      setFollowedCategories((c) => c.filter((x) => x !== category));
+      await apiSend(`/api/category-follows/${encodeURIComponent(category)}`, "DELETE", { phone: buyerInfo.phone }, token).catch(() => {});
+    } else {
+      setFollowedCategories((c) => [...c, category]);
+      await apiSend("/api/category-follows", "POST", { phone: buyerInfo.phone, category }, token).catch(() => {});
+    }
+  }
   // Mémorise la dernière annonce fermée par l'acheteur (sur cet appareil) —
   // si le propriétaire publie une nouvelle annonce, elle réapparaît quand
   // même puisque son horodatage est différent.
@@ -1747,10 +1782,17 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
             <ZonePicker value={zone} onChange={setZone} allowNational />
             <div>
               <label className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 block mb-1.5">Catégorie</label>
-              <select value={category} onChange={(e) => { setCategory(e.target.value); setVisibleCount(20); }} className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-[#14213D] text-sm focus:outline-none focus:border-[#F2A93B]">
-                <option value="">Toutes</option>
-                {CATEGORIES.map((c) => <option key={c.name} value={c.name}>{c.emoji} {c.name}</option>)}
-              </select>
+              <div className="flex gap-2">
+                <select value={category} onChange={(e) => { setCategory(e.target.value); setVisibleCount(20); }} className="f-body flex-1 px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-[#14213D] text-sm focus:outline-none focus:border-[#F2A93B]">
+                  <option value="">Toutes</option>
+                  {CATEGORIES.map((c) => <option key={c.name} value={c.name}>{c.emoji} {c.name}</option>)}
+                </select>
+                {category && buyerInfo.phone && (
+                  <button onClick={() => toggleCategoryFollow(category)} className={`f-mono text-xs px-3 rounded-lg border-2 whitespace-nowrap ${followedCategories.includes(category) ? "border-[#F2A93B] bg-[#F2A93B]/10 text-[#14213D]" : "border-[#14213D]/15 text-[#14213D]/50"}`}>
+                    {followedCategories.includes(category) ? "🔔 Suivi" : "🔕 Suivre"}
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 
@@ -1779,6 +1821,14 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                       <span className="absolute bottom-1.5 left-1.5 f-mono text-[9px] bg-black/60 text-white px-1.5 py-0.5 rounded-full">
                         🎥 {p.videoUrls && p.videoUrls.length > 1 ? p.videoUrls.length : "Vidéo"}
                       </span>
+                    )}
+                    {buyerInfo.phone && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); toggleFavorite(p.id); }}
+                        className="absolute top-1.5 right-1.5 w-7 h-7 rounded-full bg-black/40 flex items-center justify-center text-sm"
+                      >
+                        {favorites.includes(p.id) ? "❤️" : "🤍"}
+                      </button>
                     )}
                   </div>
                   <div className="p-4 border-t-2 border-dashed border-[#14213D]/15 flex-1 flex flex-col">
@@ -2136,7 +2186,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
           </div>
         </div>
       )}
-      {galleryProduct && <ProductGalleryModal product={galleryProduct} onClose={() => setGalleryProduct(null)} />}
+      {galleryProduct && <ProductGalleryModal product={galleryProduct} onClose={() => setGalleryProduct(null)} buyerPhone={buyerInfo.phone} />}
       {receiptOrder && <ReceiptModal order={receiptOrder} onClose={() => setReceiptOrder(null)} />}
     </div>
   );
