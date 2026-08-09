@@ -217,6 +217,7 @@ function mapProduct(r) {
     imageUrls: r.image_urls && r.image_urls.length ? r.image_urls : (r.image_url ? [r.image_url] : []),
     videoUrl: r.video_url || "",
     videoUrls: r.video_urls && r.video_urls.length ? r.video_urls : (r.video_url ? [r.video_url] : []),
+    tagline: r.tagline || "",
   };
 }
 function mapOrder(r) {
@@ -433,10 +434,10 @@ app.post("/api/products/generate-description", requirePhone((req) => req.body.ve
       },
       body: JSON.stringify({
         model: "claude-haiku-4-5-20251001",
-        max_tokens: 200,
+        max_tokens: 250,
         messages: [{
           role: "user",
-          content: `Rédige une description de produit courte (2-3 phrases, 40-60 mots), attirante et honnête, pour un marché en ligne local en Côte d'Ivoire. Pas de markdown, pas de titre, juste le texte de la description en français, prêt à publier.\n\nProduit : ${name}\nCatégorie : ${category || "non précisée"}\nMots-clés du vendeur : ${keywords || "aucun"}`,
+          content: `Pour un marché en ligne local en Côte d'Ivoire, rédige deux choses pour ce produit, en français, honnêtes et sans exagération. Réponds STRICTEMENT en JSON, rien d'autre, format exact : {"description": "...", "tagline": "..."}\n- description : 2-3 phrases (40-60 mots), attirante, prête à publier, pas de markdown.\n- tagline : accroche publicitaire très courte (4 à 7 mots max), percutante, pour une bannière animée.\n\nProduit : ${name}\nCatégorie : ${category || "non précisée"}\nMots-clés du vendeur : ${keywords || "aucun"}`,
         }],
       }),
     });
@@ -445,8 +446,16 @@ app.post("/api/products/generate-description", requirePhone((req) => req.body.ve
       throw new Error(`Anthropic a répondu ${r.status} : ${detail}`);
     }
     const data = await r.json();
-    const description = (data.content || []).map((b) => b.text || "").join("").trim();
-    res.json({ description });
+    const raw = (data.content || []).map((b) => b.text || "").join("").trim();
+    let description = raw, tagline = "";
+    try {
+      const parsed = JSON.parse(raw.replace(/^```json\s*|```$/g, "").trim());
+      description = parsed.description || raw;
+      tagline = parsed.tagline || "";
+    } catch {
+      // si l'IA n'a pas renvoyé du JSON propre, on garde juste le texte comme description
+    }
+    res.json({ description, tagline });
   } catch (e) {
     console.error("Erreur pendant la génération de description IA:", e);
     res.status(500).json({ error: "Impossible de générer une description pour l'instant." });
@@ -468,9 +477,9 @@ app.post("/api/products", requirePhone((req) => req.body.vendorPhone), async (re
   const videoUrls = Array.isArray(p.videoUrls) ? p.videoUrls.slice(0, 5) : (p.videoUrl ? [p.videoUrl] : []);
   const coverVideo = videoUrls[0] || p.videoUrl || "";
   await pool.query(
-    `INSERT INTO products (id, name, price, category, zone, stock, image_url, delivery_time, vendor_name, vendor_phone, created_at, description, vendor_landmark, image_urls, video_url, video_urls)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
-    [id, p.name, p.price, p.category, p.zone, p.stock || 0, coverImage, p.deliveryTime || "Non précisé", p.vendorName, p.vendorPhone, createdAt, p.description || "", landmark, JSON.stringify(imageUrls), coverVideo, JSON.stringify(videoUrls)]
+    `INSERT INTO products (id, name, price, category, zone, stock, image_url, delivery_time, vendor_name, vendor_phone, created_at, description, vendor_landmark, image_urls, video_url, video_urls, tagline)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+    [id, p.name, p.price, p.category, p.zone, p.stock || 0, coverImage, p.deliveryTime || "Non précisé", p.vendorName, p.vendorPhone, createdAt, p.description || "", landmark, JSON.stringify(imageUrls), coverVideo, JSON.stringify(videoUrls), p.tagline || ""]
   );
   // Annonce automatique aux acheteurs — pas besoin que le propriétaire soit
   // connecté pour que les nouveautés se fassent connaître. Premier produit
@@ -508,6 +517,7 @@ app.patch("/api/products/:id", async (req, res) => {
   if (patch.stock !== undefined) { sets.push(`stock = $${i++}`); vals.push(patch.stock); }
   if (patch.deliveryTime !== undefined) { sets.push(`delivery_time = $${i++}`); vals.push(patch.deliveryTime); }
   if (patch.description !== undefined) { sets.push(`description = $${i++}`); vals.push(patch.description); }
+  if (patch.tagline !== undefined) { sets.push(`tagline = $${i++}`); vals.push(patch.tagline); }
   if (patch.vendorLandmark !== undefined) { sets.push(`vendor_landmark = $${i++}`); vals.push(patch.vendorLandmark); }
   if (Array.isArray(patch.videoUrls)) {
     const videoUrls = patch.videoUrls.slice(0, 5);
