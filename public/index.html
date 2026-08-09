@@ -928,7 +928,7 @@ const ORDER_GRACE_PERIOD_MS_CLIENT = 10 * 60 * 1000;
 // Vidéo de la bannière d'annonce — se lance en boucle, coupée par défaut
 // (obligatoire pour l'autoplay dans tous les navigateurs), avec un bouton
 // 🔊 pour activer le son en un seul geste, comme sur Instagram/TikTok.
-function AnnouncementVideoThumb({ src }) {
+function AnnouncementVideoThumb({ src, large }) {
   const videoRef = useRef(null);
   const [muted, setMuted] = useState(true);
   function toggleSound() {
@@ -937,6 +937,16 @@ function AnnouncementVideoThumb({ src }) {
       if (videoRef.current) videoRef.current.muted = next;
       return next;
     });
+  }
+  if (large) {
+    return (
+      <div className="relative w-full">
+        <video ref={videoRef} src={src} autoPlay muted loop playsInline className="w-full h-56 sm:h-72 object-cover bg-black" />
+        <button onClick={toggleSound} className="absolute bottom-2 right-2 bg-black/60 text-white rounded-full w-9 h-9 flex items-center justify-center text-base">
+          {muted ? "🔇" : "🔊"}
+        </button>
+      </div>
+    );
   }
   return (
     <div className="relative w-16 h-16 flex-shrink-0">
@@ -1738,20 +1748,29 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
   return (
     <div className="max-w-5xl mx-auto px-4 py-6">
       {showAnnouncement && (
-        <div className="bg-[#F2A93B]/15 border-2 border-[#F2A93B]/40 rounded-xl px-4 py-3 mb-4 flex items-start gap-3">
-          {announcementVideoUrl ? (
-            <AnnouncementVideoThumb src={announcementVideoUrl} />
-          ) : (
-            <span className="text-lg leading-none">📣</span>
-          )}
-          <div className="flex-1">
-            <p className="f-body text-sm text-[#14213D]">{announcementMessage}</p>
-            {announcementProduct && (
-              <button onClick={() => setGalleryProduct(announcementProduct)} className="f-mono text-xs text-[#14213D] underline mt-1">Voir le produit →</button>
-            )}
+        announcementVideoUrl ? (
+          <div className="bg-[#F2A93B]/15 border-2 border-[#F2A93B]/40 rounded-xl overflow-hidden mb-4 relative">
+            <button onClick={dismissAnnouncement} className="absolute top-2 right-2 z-10 f-mono text-xs bg-black/50 text-white w-6 h-6 rounded-full flex items-center justify-center">✕</button>
+            <AnnouncementVideoThumb src={announcementVideoUrl} large />
+            <div className="px-4 py-3">
+              <p className="f-body text-sm text-[#14213D]">{announcementMessage}</p>
+              {announcementProduct && (
+                <button onClick={() => setGalleryProduct(announcementProduct)} className="f-mono text-xs text-[#14213D] underline mt-1">Voir le produit →</button>
+              )}
+            </div>
           </div>
-          <button onClick={dismissAnnouncement} className="f-mono text-xs text-[#14213D]/40 hover:text-[#14213D]">✕</button>
-        </div>
+        ) : (
+          <div className="bg-[#F2A93B]/15 border-2 border-[#F2A93B]/40 rounded-xl px-4 py-3 mb-4 flex items-start gap-3">
+            <span className="text-lg leading-none">📣</span>
+            <div className="flex-1">
+              <p className="f-body text-sm text-[#14213D]">{announcementMessage}</p>
+              {announcementProduct && (
+                <button onClick={() => setGalleryProduct(announcementProduct)} className="f-mono text-xs text-[#14213D] underline mt-1">Voir le produit →</button>
+              )}
+            </div>
+            <button onClick={dismissAnnouncement} className="f-mono text-xs text-[#14213D]/40 hover:text-[#14213D]">✕</button>
+          </div>
+        )
       )}
       <div className="flex items-center justify-between mb-5">
         <div className="flex items-center gap-2">
