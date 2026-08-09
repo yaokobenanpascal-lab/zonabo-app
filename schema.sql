@@ -386,3 +386,7 @@ CREATE TABLE IF NOT EXISTS notification_log (
   sent_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_notif_log_buyer_type ON notification_log(buyer_phone, type, sent_at);
+
+-- Accroche publicitaire courte (générée par l'IA en même temps que la
+-- description) — affichée en surimpression animée sur la photo du produit.
+ALTER TABLE products ADD COLUMN IF NOT EXISTS tagline TEXT;
