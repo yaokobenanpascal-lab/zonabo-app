@@ -19,6 +19,24 @@
 <script src="https://cdn.cinetpay.com/seamless/main.js"></script>
 <style>
   body { margin: 0; }
+  /* Effet "Ken Burns" — léger zoom lent en boucle sur les photos produit
+     sans vidéo, pour donner une impression de mouvement/pub attractive,
+     sans aucun coût ni service externe. */
+  @keyframes zonako-kenburns {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.12); }
+    100% { transform: scale(1); }
+  }
+  .zonako-kenburns {
+    animation: zonako-kenburns 12s ease-in-out infinite;
+  }
+  @keyframes zonako-tagline-in {
+    0% { opacity: 0; transform: translateY(-6px); }
+    100% { opacity: 1; transform: translateY(0); }
+  }
+  .zonako-tagline {
+    animation: zonako-tagline-in 0.5s ease-out;
+  }
 </style>
 </head>
 <body>
@@ -87,6 +105,14 @@ const CLOUDINARY_CONFIG = {
   cloudName: "kylr0amb",
   uploadPreset: "zonako_uploads",
 };
+// Améliore automatiquement une photo (luminosité, contraste, netteté) via les
+// transformations Cloudinary — gratuit, déjà inclus, aucun service en plus.
+// Insère les paramètres juste après "/upload/" dans l'URL Cloudinary. Si ce
+// n'est pas une URL Cloudinary (ex: ancien fallback base64), renvoie tel quel.
+function enhancedImageUrl(url) {
+  if (!url || !url.includes("/upload/")) return url;
+  return url.replace("/upload/", "/upload/e_improve,e_auto_contrast,e_sharpen:60/");
+}
 async function uploadImageToCloudinary(file) {
   if (CLOUDINARY_CONFIG.cloudName.startsWith("REMPLACE")) {
     throw new Error("Cloudinary n'est pas encore configuré (voir CLOUDINARY_CONFIG en haut du fichier).");
@@ -567,7 +593,7 @@ function ProductGalleryModal({ product, onClose, buyerPhone }) {
         {current.type === "video" ? (
           <video src={current.url} controls autoPlay className="w-full max-h-[70vh] rounded-xl bg-black" />
         ) : (
-          <img src={current.url} alt={product.name} className="w-full max-h-[70vh] object-contain rounded-xl" />
+          <img src={current.type === "image" ? enhancedImageUrl(current.url) : current.url} alt={product.name} className="w-full max-h-[70vh] object-contain rounded-xl" />
         )}
         {current.type === "buyer_image" && (
           <span className="absolute top-2 left-2 f-mono text-[10px] bg-[#2D6A4F] text-white px-2 py-1 rounded-full">✓ Photo d'un acheteur réel</span>
@@ -1831,7 +1857,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                     {p.videoUrl ? (
                       <video src={p.videoUrl} autoPlay muted loop playsInline className="w-full h-full object-cover" />
                     ) : p.imageUrl ? (
-                      <img src={p.imageUrl} alt={p.name} className="w-full h-full object-cover" onError={(e) => { e.target.style.display = "none"; e.target.parentElement.textContent = cat?.emoji || "📦"; }} />
+                      <img src={enhancedImageUrl(p.imageUrl)} alt={p.name} className="zonako-kenburns w-full h-full object-cover" onError={(e) => { e.target.style.display = "none"; e.target.parentElement.textContent = cat?.emoji || "📦"; }} />
                     ) : (cat?.emoji || "📦")}
                     {p.imageUrls && p.imageUrls.length > 1 && (
                       <span className="absolute bottom-1.5 right-1.5 f-mono text-[9px] bg-black/60 text-white px-1.5 py-0.5 rounded-full">📷 {p.imageUrls.length}</span>
@@ -1848,6 +1874,11 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                       >
                         {favorites.includes(p.id) ? "❤️" : "🤍"}
                       </button>
+                    )}
+                    {p.tagline && !p.videoUrl && (
+                      <span className="zonako-tagline absolute top-1.5 left-1.5 right-9 f-mono text-[9px] bg-[#C1440E] text-white px-2 py-1 rounded-full truncate">
+                        ✨ {p.tagline}
+                      </span>
                     )}
                   </div>
                   <div className="p-4 border-t-2 border-dashed border-[#14213D]/15 flex-1 flex flex-col">
@@ -2213,7 +2244,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
 
 function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addProduct, updateProduct, deleteProduct, orders, confirmOrder, cancelOrder, shipOrder, updateStatus, setRole, trialDays, accessFee, onPhoneChanged, proposeTransport, confirmTransport, tip }) {
   const [shipForm, setShipForm] = useState({}); // { [orderId]: { company, tracking } }
-  const [form, setForm] = useState({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrls: [], videoUrls: [], deliveryTime: "", description: "", vendorLandmark: vendorInfo.landmark || "" });
+  const [form, setForm] = useState({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrls: [], videoUrls: [], deliveryTime: "", description: "", tagline: "", vendorLandmark: vendorInfo.landmark || "" });
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [editingProfile, setEditingProfile] = useState(false);
@@ -2341,8 +2372,8 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
     setGeneratingDesc(true);
     setPublishError("");
     try {
-      const { description } = await apiSend("/api/products/generate-description", "POST", { vendorPhone: vendorInfo.phone, name: form.name, category: form.category, keywords: descKeywords }, getPhoneToken(vendorInfo.phone));
-      setForm((f) => ({ ...f, description }));
+      const { description, tagline } = await apiSend("/api/products/generate-description", "POST", { vendorPhone: vendorInfo.phone, name: form.name, category: form.category, keywords: descKeywords }, getPhoneToken(vendorInfo.phone));
+      setForm((f) => ({ ...f, description, tagline: tagline || f.tagline }));
     } catch (e) {
       setPublishError(e.message || "Impossible de générer une description pour l'instant.");
     }
@@ -2676,6 +2707,12 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                 {generatingDesc ? "…" : "✨ Générer avec l'IA"}
               </button>
             </div>
+            {form.tagline && (
+              <div>
+                <input placeholder="Accroche publicitaire" value={form.tagline} onChange={(e) => setForm({ ...form, tagline: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#F2A93B]/40 bg-[#F2A93B]/5 text-sm" />
+                <p className="f-body text-[10px] text-[#14213D]/35 mt-1">S'affiche en surimpression animée sur ta photo, pour attirer l'œil des acheteurs.</p>
+              </div>
+            )}
             <input placeholder="Prix (FCFA)" type="number" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#2D6A4F]" />
             <input placeholder="Stock disponible" type="number" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#2D6A4F]" />
             <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm">
@@ -2702,7 +2739,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                 setPublishError("");
                 try {
                   await addProduct({ ...form, price: Number(form.price), stock: Number(form.stock) || 0, deliveryTime: form.deliveryTime || "Non précisé", vendorName: vendorInfo.name, vendorPhone: vendorInfo.phone });
-                  setForm({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrls: [], videoUrls: [], deliveryTime: "", description: "", vendorLandmark: vendorInfo.landmark || "" });
+                  setForm({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrls: [], videoUrls: [], deliveryTime: "", description: "", tagline: "", vendorLandmark: vendorInfo.landmark || "" });
                   setCertifiedAccurate(false);
                 } catch (e) {
                   setPublishError(e.message || "Impossible de publier le produit. Réessaie.");
