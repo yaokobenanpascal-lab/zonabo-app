@@ -63,6 +63,13 @@ const EMAIL_CONFIGURED = BREVO_API_KEY && BREVO_FROM_EMAIL;
 if (!EMAIL_CONFIGURED) {
   console.warn("⚠️  Brevo non configuré (BREVO_API_KEY/BREVO_FROM_EMAIL) — les codes envoyés par email s'afficheront dans les logs du serveur (mode test).");
 }
+
+// Aide à la rédaction de descriptions de produits (IA) — via l'API Anthropic.
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
+if (!ANTHROPIC_API_KEY) {
+  console.warn("⚠️  ANTHROPIC_API_KEY non définie — l'aide à la rédaction IA sera indisponible tant que ce n'est pas réglé.");
+}
+
 async function sendEmail(to, subject, textContent) {
   if (!EMAIL_CONFIGURED) {
     console.log(`[MODE TEST — pas de Brevo configuré] Email à ${to} — "${subject}" : ${textContent}`);
@@ -407,6 +414,43 @@ app.get("/api/products", async (req, res) => {
      ORDER BY p.created_at DESC`
   );
   res.json(rows.map(mapProduct));
+});
+
+// Aide à la rédaction : le vendeur donne juste le nom + quelques mots-clés,
+// l'IA rédige une description attirante. Le vendeur reste libre de la
+// modifier ou de l'ignorer avant de publier.
+app.post("/api/products/generate-description", requirePhone((req) => req.body.vendorPhone), async (req, res) => {
+  if (!ANTHROPIC_API_KEY) return res.status(500).json({ error: "L'aide à la rédaction IA n'est pas encore configurée sur le serveur." });
+  const { name, category, keywords } = req.body;
+  if (!name) return res.status(400).json({ error: "Le nom du produit est requis." });
+  try {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 200,
+        messages: [{
+          role: "user",
+          content: `Rédige une description de produit courte (2-3 phrases, 40-60 mots), attirante et honnête, pour un marché en ligne local en Côte d'Ivoire. Pas de markdown, pas de titre, juste le texte de la description en français, prêt à publier.\n\nProduit : ${name}\nCatégorie : ${category || "non précisée"}\nMots-clés du vendeur : ${keywords || "aucun"}`,
+        }],
+      }),
+    });
+    if (!r.ok) {
+      const detail = await r.text().catch(() => "");
+      throw new Error(`Anthropic a répondu ${r.status} : ${detail}`);
+    }
+    const data = await r.json();
+    const description = (data.content || []).map((b) => b.text || "").join("").trim();
+    res.json({ description });
+  } catch (e) {
+    console.error("Erreur pendant la génération de description IA:", e);
+    res.status(500).json({ error: "Impossible de générer une description pour l'instant." });
+  }
 });
 
 app.post("/api/products", requirePhone((req) => req.body.vendorPhone), async (req, res) => {
