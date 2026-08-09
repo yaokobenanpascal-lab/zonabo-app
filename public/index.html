@@ -2220,6 +2220,8 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
   const [profileForm, setProfileForm] = useState({ name: vendorInfo.name, phone: vendorInfo.phone });
   const [publishing, setPublishing] = useState(false);
   const [publishError, setPublishError] = useState("");
+  const [generatingDesc, setGeneratingDesc] = useState(false);
+  const [descKeywords, setDescKeywords] = useState("");
   const [certifiedAccurate, setCertifiedAccurate] = useState(false);
   const [uploadingImg, setUploadingImg] = useState(false);
   const [uploadingEditImg, setUploadingEditImg] = useState(false);
@@ -2333,6 +2335,18 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
   function removeImage(target, index) {
     if (target === "new") setForm((f) => ({ ...f, imageUrls: f.imageUrls.filter((_, i) => i !== index) }));
     else setEditForm((f) => ({ ...f, imageUrls: (f.imageUrls || []).filter((_, i) => i !== index) }));
+  }
+  async function generateDescription() {
+    if (!form.name.trim()) { setPublishError("Donne d'abord un nom au produit."); return; }
+    setGeneratingDesc(true);
+    setPublishError("");
+    try {
+      const { description } = await apiSend("/api/products/generate-description", "POST", { vendorPhone: vendorInfo.phone, name: form.name, category: form.category, keywords: descKeywords }, getPhoneToken(vendorInfo.phone));
+      setForm((f) => ({ ...f, description }));
+    } catch (e) {
+      setPublishError(e.message || "Impossible de générer une description pour l'instant.");
+    }
+    setGeneratingDesc(false);
   }
   async function handleVideoUpload(file, target) {
     if (!file) return;
@@ -2656,6 +2670,12 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
             </div>
 
             <textarea placeholder="Détails sur l'article (matière, taille, état, ce qui le rend spécial...)" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} rows={3} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#2D6A4F]" />
+            <div className="flex gap-2">
+              <input placeholder="Mots-clés pour l'IA (facultatif : couleur, matière, usage...)" value={descKeywords} onChange={(e) => setDescKeywords(e.target.value)} className="f-body flex-1 px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-xs" />
+              <button disabled={generatingDesc || !form.name.trim()} onClick={generateDescription} className="f-mono text-xs bg-[#14213D] disabled:opacity-40 text-white px-3 py-2 rounded-lg whitespace-nowrap">
+                {generatingDesc ? "…" : "✨ Générer avec l'IA"}
+              </button>
+            </div>
             <input placeholder="Prix (FCFA)" type="number" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#2D6A4F]" />
             <input placeholder="Stock disponible" type="number" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#2D6A4F]" />
             <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm">
