@@ -2254,7 +2254,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
   const [generatingDesc, setGeneratingDesc] = useState(false);
   const [descKeywords, setDescKeywords] = useState("");
   const [generatingMannequin, setGeneratingMannequin] = useState(false);
-  const [garmentType, setGarmentType] = useState("Tenue casual (jean, t-shirt...)");
+  const [displayType, setDisplayType] = useState("Vêtement femme");
   const [mannequinError, setMannequinError] = useState("");
   const [certifiedAccurate, setCertifiedAccurate] = useState(false);
   const [uploadingImg, setUploadingImg] = useState(false);
@@ -2387,8 +2387,10 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
     setGeneratingMannequin(true);
     setMannequinError("");
     try {
-      const { imageUrl } = await apiSend("/api/products/generate-mannequin-photo", "POST", { vendorPhone: vendorInfo.phone, imageUrl: form.imageUrls[0], garmentType }, getPhoneToken(vendorInfo.phone));
-      if (form.imageUrls.length < 5) setForm((f) => ({ ...f, imageUrls: [...f.imageUrls, imageUrl] }));
+      const { imageUrl } = await apiSend("/api/products/generate-mannequin-photo", "POST", { vendorPhone: vendorInfo.phone, imageUrl: form.imageUrls[0], displayType }, getPhoneToken(vendorInfo.phone));
+      // La photo générée passe en premier (couverture) — c'est elle que
+      // l'acheteur voit en premier, avant les photos brutes du vendeur.
+      if (form.imageUrls.length < 5) setForm((f) => ({ ...f, imageUrls: [imageUrl, ...f.imageUrls] }));
     } catch (e) {
       setMannequinError(e.message || "Impossible de générer la photo mannequin pour l'instant.");
     }
@@ -2692,15 +2694,17 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
               <p className="f-body text-[10px] text-[#14213D]/35 mt-1">Jusqu'à 5 photos — la première sert de couverture. Montre différents angles pour rassurer les acheteurs.</p>
               {form.imageUrls[0] && form.imageUrls.length < 5 && (
                 <div className="mt-2 bg-[#14213D]/5 rounded-lg p-2.5">
-                  <p className="f-mono text-[10px] uppercase tracking-wide text-[#14213D]/50 mb-1.5">👔 Photo mannequin (IA, expérimental)</p>
-                  <select value={garmentType} onChange={(e) => setGarmentType(e.target.value)} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-xs mb-1.5">
-                    <option>Tenue casual (jean, t-shirt...)</option>
-                    <option>Robe / Jupe</option>
-                    <option>Costume / Blazer</option>
-                    <option>Vêtement sportif</option>
+                  <p className="f-mono text-[10px] uppercase tracking-wide text-[#14213D]/50 mb-1.5">✨ Photo de présentation mode (IA, expérimental)</p>
+                  <select value={displayType} onChange={(e) => setDisplayType(e.target.value)} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-xs mb-1.5">
+                    <option>Vêtement femme</option>
+                    <option>Vêtement homme</option>
+                    <option>Chaussures</option>
+                    <option>Montre</option>
+                    <option>Bijoux</option>
+                    <option>Sac / Accessoire</option>
                   </select>
                   <button disabled={generatingMannequin} onClick={generateMannequinPhoto} className="w-full f-mono text-xs bg-[#14213D] disabled:opacity-40 text-white py-2 rounded-lg">
-                    {generatingMannequin ? "Génération… (≈30-60s)" : "Générer une photo mannequin à partir de la 1ère photo"}
+                    {generatingMannequin ? "Génération… (≈30-60s)" : "Générer une photo de présentation à partir de la 1ère photo"}
                   </button>
                   {mannequinError && <p className="f-body text-[10px] text-[#C1440E] mt-1">{mannequinError}</p>}
                   <p className="f-body text-[9px] text-[#14213D]/35 mt-1">Ajoute l'image générée à tes photos — à garder ou retirer librement. Fonctionnalité en test.</p>
