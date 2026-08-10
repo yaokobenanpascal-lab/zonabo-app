@@ -70,6 +70,12 @@ if (!ANTHROPIC_API_KEY) {
   console.warn("⚠️  ANTHROPIC_API_KEY non définie — l'aide à la rédaction IA sera indisponible tant que ce n'est pas réglé.");
 }
 
+// Photo "mannequin" générée par IA (image fixe, pas de vidéo) — via l'API Runway.
+const RUNWAY_API_KEY = process.env.RUNWAY_API_KEY || "";
+if (!RUNWAY_API_KEY) {
+  console.warn("⚠️  RUNWAY_API_KEY non définie — la génération de photo mannequin sera indisponible tant que ce n'est pas réglé.");
+}
+
 async function sendEmail(to, subject, textContent) {
   if (!EMAIL_CONFIGURED) {
     console.log(`[MODE TEST — pas de Brevo configuré] Email à ${to} — "${subject}" : ${textContent}`);
@@ -459,6 +465,60 @@ app.post("/api/products/generate-description", requirePhone((req) => req.body.ve
   } catch (e) {
     console.error("Erreur pendant la génération de description IA:", e);
     res.status(500).json({ error: "Impossible de générer une description pour l'instant." });
+  }
+});
+
+// Photo "mannequin" générée par IA à partir d'une photo de l'article (via
+// Runway) — image fixe uniquement, pas de vidéo (bien moins coûteux).
+// NOTE : intégration basée sur notre meilleure compréhension de l'API Runway
+// au moment de l'écriture — à tester et ajuster ensemble avec une vraie clé,
+// contrairement aux autres intégrations (Cloudinary, Anthropic) déjà vérifiées.
+app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.body.vendorPhone), async (req, res) => {
+  if (!RUNWAY_API_KEY) return res.status(500).json({ error: "La génération de photo mannequin n'est pas encore configurée sur le serveur." });
+  const { imageUrl, garmentType } = req.body;
+  if (!imageUrl) return res.status(400).json({ error: "Choisis d'abord une photo de l'article." });
+  try {
+    const promptText = `A white plastic display mannequin torso wearing this exact ${garmentType || "garment"}, shot in a minimal e-commerce studio setting. Pure white seamless background, soft diffused front lighting with subtle fill from both sides, no shadows, neutral ground plane, slight three-quarter angle, clean product photography aesthetic, no props, no accessories. Keep the garment's real colors, pattern and texture faithful to the reference photo.`;
+    const createResp = await fetch("https://api.dev.runwayml.com/v1/text_to_image", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${RUNWAY_API_KEY}`,
+        "X-Runway-Version": "2024-11-06",
+      },
+      body: JSON.stringify({
+        model: "gen4_image",
+        promptText,
+        referenceImages: [{ uri: imageUrl }],
+        ratio: "1024:1024",
+      }),
+    });
+    if (!createResp.ok) {
+      const detail = await createResp.text().catch(() => "");
+      throw new Error(`Runway (création) a répondu ${createResp.status} : ${detail}`);
+    }
+    const created = await createResp.json();
+    const taskId = created.id;
+    if (!taskId) throw new Error("Runway n'a pas renvoyé d'identifiant de tâche.");
+
+    // Le rendu n'est pas instantané — on interroge Runway toutes les 3
+    // secondes, jusqu'à 60 secondes max, jusqu'à ce que l'image soit prête.
+    let output = null;
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const pollResp = await fetch(`https://api.dev.runwayml.com/v1/tasks/${taskId}`, {
+        headers: { "Authorization": `Bearer ${RUNWAY_API_KEY}`, "X-Runway-Version": "2024-11-06" },
+      });
+      if (!pollResp.ok) continue;
+      const poll = await pollResp.json();
+      if (poll.status === "SUCCEEDED") { output = poll.output?.[0] || null; break; }
+      if (poll.status === "FAILED") throw new Error(poll.failure || "La génération Runway a échoué.");
+    }
+    if (!output) throw new Error("La génération prend plus de temps que prévu — réessaie dans un instant.");
+    res.json({ imageUrl: output });
+  } catch (e) {
+    console.error("Erreur pendant la génération de photo mannequin (Runway):", e);
+    res.status(500).json({ error: e.message || "Impossible de générer la photo mannequin pour l'instant." });
   }
 });
 
