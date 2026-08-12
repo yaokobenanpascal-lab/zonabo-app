@@ -1875,12 +1875,12 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                         {favorites.includes(p.id) ? "❤️" : "🤍"}
                       </button>
                     )}
-                    {p.tagline && !p.videoUrl && (
-                      <span className="zonako-tagline absolute top-1.5 left-1.5 right-9 f-mono text-[9px] bg-[#C1440E] text-white px-2 py-1 rounded-full truncate">
-                        {p.tagline}
-                      </span>
-                    )}
                   </div>
+                  {p.tagline && (
+                    <div className="zonako-tagline bg-[#C1440E] text-white px-3 py-1.5">
+                      <p className="f-mono text-[10px] truncate">{p.tagline}</p>
+                    </div>
+                  )}
                   <div className="p-4 border-t-2 border-dashed border-[#14213D]/15 flex-1 flex flex-col">
                     <div className="flex items-start justify-between gap-2">
                       <h4 className="f-display font-semibold text-[#14213D] text-sm leading-snug">{p.name}</h4>
