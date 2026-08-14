@@ -16,6 +16,17 @@ app.set("trust proxy", true);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // CinetPay envoie sa notification en POST classique (formulaire), pas en JSON
 
+// En-têtes de sécurité de base — protège contre le détournement de clics
+// (clickjacking), le reniflage de type MIME, et limite les infos envoyées
+// aux autres sites via le referrer.
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  next();
+});
+
 // Filet de sécurité global : une erreur non rattrapée dans une route ne doit
 // jamais faire planter tout le serveur (donc couper le site pour tout le
 // monde) — juste être journalisée. Node arrête le processus par défaut sur
@@ -76,25 +87,37 @@ if (!RUNWAY_API_KEY) {
   console.warn("⚠️  RUNWAY_API_KEY non définie — la génération de photo mannequin sera indisponible tant que ce n'est pas réglé.");
 }
 
-async function sendEmail(to, subject, textContent) {
+async function sendEmail(to, subject, textContent, htmlContent) {
   if (!EMAIL_CONFIGURED) {
     console.log(`[MODE TEST — pas de Brevo configuré] Email à ${to} — "${subject}" : ${textContent}`);
     return;
   }
+  const body = {
+    sender: { email: BREVO_FROM_EMAIL, name: "Zonako" },
+    to: [{ email: to }],
+    subject,
+    textContent,
+  };
+  if (htmlContent) body.htmlContent = htmlContent;
   const r = await fetch("https://api.brevo.com/v3/smtp/email", {
     method: "POST",
     headers: { "Content-Type": "application/json", "api-key": BREVO_API_KEY },
-    body: JSON.stringify({
-      sender: { email: BREVO_FROM_EMAIL, name: "Zonako" },
-      to: [{ email: to }],
-      subject,
-      textContent,
-    }),
+    body: JSON.stringify(body),
   });
   if (!r.ok) {
     const detail = await r.text().catch(() => "");
     throw new Error(`Brevo a répondu ${r.status} : ${detail}`);
   }
+}
+// Petit gabarit HTML commun, avec la photo du produit bien en avant — pour
+// les relances comportementales (vu-pas-acheté, baisse de prix, nouveauté).
+function productEmailHtml({ heading, bodyHtml, imageUrl, ctaText }) {
+  return `<div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;color:#14213D;">
+    <h2 style="color:#14213D;">${heading}</h2>
+    ${imageUrl ? `<img src="${imageUrl}" alt="" style="width:100%;max-width:480px;border-radius:12px;object-fit:cover;margin:12px 0;" />` : ""}
+    <p style="font-size:15px;line-height:1.5;">${bodyHtml}</p>
+    <a href="https://zonabo-app.onrender.com" style="display:inline-block;background:#C1440E;color:#fff;text-decoration:none;padding:10px 18px;border-radius:24px;font-size:13px;margin-top:8px;">${ctaText || "Voir sur Zonako"}</a>
+  </div>`;
 }
 async function sendEmailCode(email, code) {
   await sendEmail(email, "Ton code de vérification Zonako", `Ton code de vérification Zonako est : ${code}\n\nIl est valable 10 minutes.`);
@@ -120,6 +143,36 @@ async function ensureSchema() {
 
 function uid() {
   return Date.now().toString(36) + crypto.randomBytes(4).toString("hex");
+}
+
+// ==================== PARRAINAGE (AGENTS DE RECRUTEMENT) ====================
+// Enregistre qu'une nouvelle personne s'est inscrite via le code d'un agent —
+// pas encore payé à ce stade (activated=false), seulement une fois que la
+// personne devient réellement active (voir activateReferral ci-dessous).
+async function recordReferralSignup(code, newUserPhone, role) {
+  if (!code || !code.trim()) return;
+  try {
+    const { rows } = await pool.query("SELECT phone FROM referral_agents WHERE code = $1 AND active = true", [code.trim().toUpperCase()]);
+    if (!rows[0]) return; // code invalide ou agent désactivé — on ignore silencieusement
+    await pool.query(
+      "INSERT INTO referral_signups (id, agent_phone, new_user_phone, role, created_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (new_user_phone, role) DO NOTHING",
+      [uid(), rows[0].phone, newUserPhone, role, Date.now()]
+    );
+  } catch (e) {
+    console.error("Erreur pendant l'enregistrement du parrainage:", e);
+  }
+}
+// Marque l'inscription comme "activée" (donc payable à l'agent) — appelé au
+// premier vrai signe d'activité réelle de la personne recrutée.
+async function activateReferral(newUserPhone, role) {
+  try {
+    await pool.query(
+      "UPDATE referral_signups SET activated = true, activated_at = $1 WHERE new_user_phone = $2 AND role = $3 AND activated = false",
+      [Date.now(), newUserPhone, role]
+    );
+  } catch (e) {
+    console.error("Erreur pendant l'activation du parrainage:", e);
+  }
 }
 
 // Mot de passe (facultatif) pour acheteur/vendeur/livreur — haché avec le
@@ -175,6 +228,42 @@ async function logAdminAction(action, target, details) {
   }
 }
 
+// ==================== SÉCURITÉ : détection + anti force-brute ====================
+async function logSecurityEvent(type, detail, ip) {
+  try {
+    await pool.query(
+      "INSERT INTO security_events (id, type, detail, ip, created_at) VALUES ($1,$2,$3,$4,$5)",
+      [uid(), type, detail || null, ip || null, Date.now()]
+    );
+  } catch (e) {
+    console.error("Erreur d'écriture du journal de sécurité (non bloquant):", e.message);
+  }
+}
+// Fabrique un limiteur anti force-brute réutilisable : après maxAttempts
+// échecs pour une même clé (IP, numéro...), blocage temporaire.
+function makeRateLimiter(maxAttempts, blockMs) {
+  const attempts = new Map(); // clé -> { count, blockedUntil }
+  return {
+    isBlocked(key) {
+      const a = attempts.get(key);
+      if (a && a.blockedUntil && Date.now() < a.blockedUntil) {
+        return Math.ceil((a.blockedUntil - Date.now()) / 60000);
+      }
+      return 0;
+    },
+    recordFailure(key) {
+      const a = attempts.get(key);
+      const count = (a?.count || 0) + 1;
+      attempts.set(key, { count, blockedUntil: count >= maxAttempts ? Date.now() + blockMs : null });
+      return count >= maxAttempts;
+    },
+    reset(key) {
+      attempts.delete(key);
+    },
+  };
+}
+const passwordLoginLimiter = makeRateLimiter(5, 15 * 60 * 1000);
+
 // --- Auth par téléphone (OTP SMS) : un jeton prouve "j'ai reçu le code envoyé à ce numéro" ---
 // Stocké en base de données (pas en mémoire) : sans ça, tout le monde serait
 // déconnecté à chaque redémarrage du serveur (chaque déploiement, veille du
@@ -224,6 +313,7 @@ function mapProduct(r) {
     videoUrl: r.video_url || "",
     videoUrls: r.video_urls && r.video_urls.length ? r.video_urls : (r.video_url ? [r.video_url] : []),
     tagline: r.tagline || "",
+    aiPhotoUrls: r.ai_photo_urls || [],
   };
 }
 function mapOrder(r) {
@@ -235,6 +325,7 @@ function mapOrder(r) {
     paymentMethod: r.payment_method, paid: r.paid, cinetpayTransactionId: r.cinetpay_transaction_id,
     shippingMethod: r.shipping_method, transportCompany: r.transport_company, trackingNumber: r.tracking_number,
     courierBids: r.courier_bids || [], courierConfirmed: r.courier_confirmed, courierConfirmedAt: r.courier_confirmed_at ? Number(r.courier_confirmed_at) : null,
+    courierFeePaymentMethod: r.courier_fee_payment_method || "cash", courierFeePaid: r.courier_fee_paid || false, courierPaymentConfirmed: r.courier_payment_confirmed || false,
     buyerConfirmed: r.buyer_confirmed, buyerConfirmedAt: r.buyer_confirmed_at ? Number(r.buyer_confirmed_at) : null,
     refundStatus: r.refund_status || "none",
     courierLat: r.courier_lat !== null && r.courier_lat !== undefined ? Number(r.courier_lat) : null,
@@ -475,10 +566,43 @@ app.post("/api/products/generate-description", requirePhone((req) => req.body.ve
 // contrairement aux autres intégrations (Cloudinary, Anthropic) déjà vérifiées.
 app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.body.vendorPhone), async (req, res) => {
   if (!RUNWAY_API_KEY) return res.status(500).json({ error: "La génération de photo mannequin n'est pas encore configurée sur le serveur." });
-  const { imageUrl, garmentType } = req.body;
+  const { imageUrl, displayType, pose } = req.body;
   if (!imageUrl) return res.status(400).json({ error: "Choisis d'abord une photo de l'article." });
   try {
-    const promptText = `A white plastic display mannequin torso wearing this exact ${garmentType || "garment"}, shot in a minimal e-commerce studio setting. Pure white seamless background, soft diffused front lighting with subtle fill from both sides, no shadows, neutral ground plane, slight three-quarter angle, clean product photography aesthetic, no props, no accessories. Keep the garment's real colors, pattern and texture faithful to the reference photo.`;
+    // Chaque type de produit demande une mise en scène différente — un
+    // mannequin torse ne convient qu'aux vêtements, pas à une montre ou des
+    // bijoux, qui ont besoin de leur propre présentation.
+    const STUDIO_BASE = "shot in a minimal e-commerce studio setting, pure white seamless background, soft diffused front lighting with subtle fill from both sides, no shadows, clean product photography aesthetic, no extra props. CRITICAL: this must be the EXACT same item(s) as in the reference photo — do not alter, reinterpret, or invent colors, shapes, patterns, prints, textures or materials in any way. Only change the setting/framing/presentation around it, never the item itself.";
+    const POSES = {
+      "Face": "standing straight, facing the camera directly",
+      "Trois-quarts": "standing at a slight three-quarter angle toward the camera",
+      "Profil": "standing in full side profile",
+      "Dos": "standing with back turned toward the camera, showing the back of the outfit",
+    };
+    const poseText = POSES[pose] || POSES["Trois-quarts"];
+    // Vêtement femme/homme : mannequin en pied (tête aux pieds), pas juste un
+    // buste — pour représenter la tenue complète (y compris un couvre-chef,
+    // foulard ou voile s'il fait partie de l'article/ensemble sur la photo).
+    const FULL_BODY_CLOTHING = (gender) =>
+      `A white plastic full-body ${gender}-presenting display mannequin (head to toe, including a head form) wearing the complete outfit exactly as shown in the reference photo — including any headwear, veil, headscarf or hat if part of the item(s) shown, ${poseText}, ${STUDIO_BASE}`;
+    const FORMAL_SUIT =
+      `A white plastic full-body male-presenting display mannequin (head to toe, including a head form) wearing this exact complete formal suit exactly as shown in the reference photo (jacket, trousers, and any vest, tie or accessories included), premium tailored menswear presentation, sharp confident posture, ${poseText}, elegant upscale boutique studio lighting with a subtle soft gradient backdrop instead of flat white, refined and polished product photography aesthetic. CRITICAL: this must be the EXACT same suit as in the reference photo — do not alter, reinterpret, or invent its color, cut, pattern, texture or material in any way. Only change the setting/framing/presentation around it, never the item itself.`;
+    const PROMPTS = {
+      "Vêtement femme": FULL_BODY_CLOTHING("female"),
+      "Vêtement homme": FULL_BODY_CLOTHING("male"),
+      "Costume / Tenue formelle": FORMAL_SUIT,
+      "Vêtement bébé / enfant": `This exact baby or children's garment displayed neatly on a small soft-padded infant display form or flat-laid with gentle folds, warm and clean nursery-style presentation, ${STUDIO_BASE}`,
+      "Chaussures": `A pair of this exact shoes displayed on a minimal clear acrylic shoe stand, front three-quarter angle, floating slightly above a neutral ground plane, ${STUDIO_BASE}`,
+      "Montre": `A close-up of this exact watch worn on a neutral light-toned wrist, arm resting naturally at a slight angle, focus sharp on the watch face and strap, ${STUDIO_BASE}`,
+      "Bijoux": `This exact jewelry piece elegantly presented on a minimal white jewelry display stand (bust, ring cone, or earring card as appropriate to the item type), ${STUDIO_BASE}`,
+      "Sac / Accessoire": `This exact bag or accessory placed upright on a minimal round pedestal, front three-quarter angle, ${STUDIO_BASE}`,
+      "Électronique / Téléphone": `This exact electronic device or phone displayed upright on a minimal tech-style pedestal stand, screen angled slightly toward camera if applicable, ${STUDIO_BASE}`,
+      "Maison / Déco": `This exact home or decor item staged naturally within a tastefully minimal, softly lit interior setting (neutral shelf, table or console), giving a sense of scale and real use, ${STUDIO_BASE.replace("pure white seamless background, ", "")}`,
+      "Cuisine / Ustensiles": `This exact kitchen item staged neatly on a clean light-toned countertop, slight overhead-angled product shot, ${STUDIO_BASE}`,
+      "Beauté / Cosmétique": `This exact beauty or cosmetic product displayed upright on a minimal elegant vanity-style pedestal, ${STUDIO_BASE}`,
+      "Jouet / Enfant": `This exact toy or children's item displayed upright on a clean minimal surface, playful but tidy product photography style, ${STUDIO_BASE}`,
+    };
+    const promptText = PROMPTS[displayType] || PROMPTS["Vêtement femme"];
     const createResp = await fetch("https://api.dev.runwayml.com/v1/text_to_image", {
       method: "POST",
       headers: {
@@ -532,14 +656,19 @@ app.post("/api/products", requirePhone((req) => req.body.vendorPhone), async (re
   const landmark = p.vendorLandmark || prof[0]?.landmark || "";
   // Jusqu'à 5 photos par produit. La première sert de photo de couverture (image_url).
   const imageUrls = Array.isArray(p.imageUrls) ? p.imageUrls.slice(0, 5) : (p.imageUrl ? [p.imageUrl] : []);
+  const aiPhotoUrls = Array.isArray(p.aiPhotoUrls) ? p.aiPhotoUrls : [];
+  const realPhotosLeft = imageUrls.filter((url) => !aiPhotoUrls.includes(url));
+  if (imageUrls.length > 0 && realPhotosLeft.length === 0) {
+    return res.status(400).json({ error: "Il doit rester au moins une vraie photo de l'article (pas seulement des photos générées par IA)." });
+  }
   const coverImage = imageUrls[0] || p.imageUrl || "";
   // Jusqu'à 5 vidéos par produit (même principe que les photos).
   const videoUrls = Array.isArray(p.videoUrls) ? p.videoUrls.slice(0, 5) : (p.videoUrl ? [p.videoUrl] : []);
   const coverVideo = videoUrls[0] || p.videoUrl || "";
   await pool.query(
-    `INSERT INTO products (id, name, price, category, zone, stock, image_url, delivery_time, vendor_name, vendor_phone, created_at, description, vendor_landmark, image_urls, video_url, video_urls, tagline)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
-    [id, p.name, p.price, p.category, p.zone, p.stock || 0, coverImage, p.deliveryTime || "Non précisé", p.vendorName, p.vendorPhone, createdAt, p.description || "", landmark, JSON.stringify(imageUrls), coverVideo, JSON.stringify(videoUrls), p.tagline || ""]
+    `INSERT INTO products (id, name, price, category, zone, stock, image_url, delivery_time, vendor_name, vendor_phone, created_at, description, vendor_landmark, image_urls, video_url, video_urls, tagline, ai_photo_urls)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+    [id, p.name, p.price, p.category, p.zone, p.stock || 0, coverImage, p.deliveryTime || "Non précisé", p.vendorName, p.vendorPhone, createdAt, p.description || "", landmark, JSON.stringify(imageUrls), coverVideo, JSON.stringify(videoUrls), p.tagline || "", JSON.stringify(Array.isArray(p.aiPhotoUrls) ? p.aiPhotoUrls : [])]
   );
   // Annonce automatique aux acheteurs — pas besoin que le propriétaire soit
   // connecté pour que les nouveautés se fassent connaître. Premier produit
@@ -547,6 +676,7 @@ app.post("/api/products", requirePhone((req) => req.body.vendorPhone), async (re
   try {
     const { rows: countRows } = await pool.query("SELECT COUNT(*)::int AS n FROM products WHERE vendor_phone = $1", [p.vendorPhone]);
     const isFirstProduct = countRows[0].n <= 1;
+    if (isFirstProduct) activateReferral(p.vendorPhone, "vendor");
     const message = isFirstProduct
       ? `🎉 ${p.vendorName} vient de rejoindre Zonako ! Découvre "${p.name}".`
       : `🆕 Nouveau chez ${p.vendorName} : "${p.name}".`;
@@ -559,14 +689,14 @@ app.post("/api/products", requirePhone((req) => req.body.vendorPhone), async (re
   }
   // Notifie par email les acheteurs qui suivent cette catégorie — ne bloque
   // pas la réponse (peut concerner plusieurs personnes à la fois).
-  notifyCategoryFollowers(p.category, id, p.name, p.vendorName);
+  notifyCategoryFollowers(p.category, id, p.name, p.vendorName, coverImage);
   const { rows } = await pool.query("SELECT * FROM products WHERE id = $1", [id]);
   res.json(mapProduct(rows[0]));
 });
 
 app.patch("/api/products/:id", async (req, res) => {
   const tokenPhone = await getTokenPhone(req);
-  const { rows: existing } = await pool.query("SELECT vendor_phone FROM products WHERE id = $1", [req.params.id]);
+  const { rows: existing } = await pool.query("SELECT vendor_phone, ai_photo_urls FROM products WHERE id = $1", [req.params.id]);
   if (!existing[0]) return res.status(404).json({ error: "Produit introuvable." });
   if (!tokenPhone || tokenPhone !== existing[0].vendor_phone) return res.status(403).json({ error: "Tu ne peux modifier que tes propres produits." });
   const patch = req.body;
@@ -588,8 +718,16 @@ app.patch("/api/products/:id", async (req, res) => {
   }
   if (Array.isArray(patch.imageUrls)) {
     const imageUrls = patch.imageUrls.slice(0, 5);
+    const aiPhotoUrls = Array.isArray(patch.aiPhotoUrls) ? patch.aiPhotoUrls : (existing[0].ai_photo_urls || []);
+    // Au moins une vraie photo (non générée par IA) doit toujours rester —
+    // sinon l'acheteur ne voit jamais l'article réel, seulement une version stylisée.
+    const realPhotosLeft = imageUrls.filter((url) => !aiPhotoUrls.includes(url));
+    if (imageUrls.length > 0 && realPhotosLeft.length === 0) {
+      return res.status(400).json({ error: "Il doit rester au moins une vraie photo de l'article (pas seulement des photos générées par IA)." });
+    }
     sets.push(`image_urls = $${i++}`); vals.push(JSON.stringify(imageUrls));
     sets.push(`image_url = $${i++}`); vals.push(imageUrls[0] || "");
+    if (patch.aiPhotoUrls !== undefined) { sets.push(`ai_photo_urls = $${i++}`); vals.push(JSON.stringify(aiPhotoUrls.filter((u) => imageUrls.includes(u)))); }
   } else if (patch.imageUrl !== undefined) {
     sets.push(`image_url = $${i++}`); vals.push(patch.imageUrl);
   }
@@ -613,6 +751,16 @@ app.delete("/api/products/:id", async (req, res) => {
 app.get("/api/orders", async (req, res) => {
   const { rows } = await pool.query("SELECT * FROM orders ORDER BY created_at DESC");
   res.json(rows.map(mapOrder));
+});
+
+// Code de confirmation de livraison — volontairement JAMAIS inclus dans
+// mapOrder/GET /api/orders (accessible largement) : uniquement récupérable
+// ici, par l'acheteur lui-même, pour qu'il ne fuite jamais vers le livreur.
+app.get("/api/orders/:id/pin", requirePhone((req) => req.query.phone), async (req, res) => {
+  const { rows } = await pool.query("SELECT buyer_phone, delivery_pin FROM orders WHERE id = $1", [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: "Commande introuvable." });
+  if (req.query.phone !== rows[0].buyer_phone) return res.status(403).json({ error: "Ce n'est pas ta commande." });
+  res.json({ pin: rows[0].delivery_pin });
 });
 
 app.post("/api/orders", requirePhone((req) => req.body.buyerPhone), async (req, res) => {
@@ -651,15 +799,18 @@ app.post("/api/orders", requirePhone((req) => req.body.buyerPhone), async (req, 
     // compagnie, c'est enregistré comme sa proposition initiale — le vendeur devra
     // la confirmer (avec des frais) ou en proposer une autre.
     const initialTransportCompany = o.shippingMethod === "transport" && o.transportCompany ? o.transportCompany : null;
+    // Code à 4 chiffres connu seulement de l'acheteur — exigé du livreur pour
+    // valider la remise du colis (protège contre un détournement).
+    const deliveryPin = String(Math.floor(1000 + Math.random() * 9000));
     await client.query(
       `INSERT INTO orders (id, buyer_name, buyer_phone, zone, items, total, delivery_fee, fee_rate, commission, status,
          courier_name, courier_phone, created_at, payment_method, paid, cinetpay_transaction_id, shipping_method,
          transport_company, tracking_number, courier_bids, courier_confirmed, buyer_confirmed,
-         transport_proposed_by, transport_confirmed_by_buyer, buyer_address)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'nouvelle',NULL,NULL,$10,$11,false,$12,$13,$14,NULL,'[]',false,false,$15,$16,$17)`,
+         transport_proposed_by, transport_confirmed_by_buyer, buyer_address, delivery_pin)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'nouvelle',NULL,NULL,$10,$11,false,$12,$13,$14,NULL,'[]',false,false,$15,$16,$17,$18)`,
       [id, o.buyerName, o.buyerPhone, o.zone, JSON.stringify(o.items || []), o.total, o.deliveryFee || 0, feeRate, commission,
         createdAt, o.paymentMethod || "cod", o.cinetpayTransactionId || null, o.shippingMethod || "livreur",
-        initialTransportCompany, initialTransportCompany ? "buyer" : null, !!initialTransportCompany, o.buyerAddress || ""]
+        initialTransportCompany, initialTransportCompany ? "buyer" : null, !!initialTransportCompany, o.buyerAddress || "", deliveryPin]
     );
     if (o.clientKey) {
       await client.query(
@@ -824,9 +975,13 @@ app.post("/api/orders/:id/choose-courier", async (req, res) => {
 // vendeurs sont présents dans une même commande, chacun paie au prorata de sa part.
 async function settleVendorCommission(orderId) {
   try {
-    const { rows } = await pool.query("SELECT items, commission FROM orders WHERE id = $1", [orderId]);
+    const { rows } = await pool.query("SELECT items, commission, buyer_phone, courier_phone FROM orders WHERE id = $1", [orderId]);
     const order = rows[0];
     if (!order) return;
+    // Une commande livrée est le premier vrai signe d'activité réelle pour
+    // l'acheteur (et pour le livreur, s'il y en a un) — active leur parrainage.
+    if (order.buyer_phone) activateReferral(order.buyer_phone, "buyer");
+    if (order.courier_phone) activateReferral(order.courier_phone, "courier");
     const items = order.items || [];
     const totalGoods = items.reduce((s, it) => s + Number(it.price) * Number(it.qty), 0);
     if (totalGoods <= 0) return;
@@ -872,14 +1027,33 @@ async function autoConfirmStaleDeliveries() {
 
 app.post("/api/orders/:id/confirm-courier", async (req, res) => {
   const tokenPhone = await getTokenPhone(req);
-  const { rows } = await pool.query("SELECT buyer_confirmed, courier_phone FROM orders WHERE id = $1", [req.params.id]);
+  const { rows } = await pool.query("SELECT buyer_confirmed, courier_phone, delivery_pin, delivery_fee, courier_fee_payment_method, courier_fee_paid FROM orders WHERE id = $1", [req.params.id]);
   if (!rows[0]) return res.status(404).json({ error: "Commande introuvable." });
   if (!tokenPhone || tokenPhone !== rows[0].courier_phone) return res.status(403).json({ error: "Tu n'es pas le livreur de cette commande." });
+  // Le livreur doit obtenir ce code auprès de l'acheteur au moment de la
+  // remise réelle — empêche de valider une livraison qui n'a pas eu lieu.
+  if (rows[0].delivery_pin && req.body.pin !== rows[0].delivery_pin) {
+    return res.status(400).json({ error: "Code incorrect — demande-le à l'acheteur au moment de la remise." });
+  }
+  // Le livreur confirme par écrit avoir bien reçu son paiement (espèces ou en
+  // ligne) — laisse une trace, en plus du code de livraison lui-même.
+  if (!req.body.paymentConfirmed) {
+    return res.status(400).json({ error: "Confirme d'abord avoir bien reçu ton paiement de livraison." });
+  }
+  if (rows[0].courier_fee_payment_method === "cinetpay" && !rows[0].courier_fee_paid) {
+    return res.status(400).json({ error: "L'acheteur n'a pas encore payé les frais de livraison en ligne." });
+  }
   const status = rows[0].buyer_confirmed ? "livree" : undefined;
   await pool.query(
-    `UPDATE orders SET courier_confirmed = true, courier_confirmed_at = $1 ${status ? ", status = 'livree'" : ""} WHERE id = $2`,
+    `UPDATE orders SET courier_confirmed = true, courier_confirmed_at = $1, courier_payment_confirmed = true ${status ? ", status = 'livree'" : ""} WHERE id = $2`,
     [Date.now(), req.params.id]
   );
+  // Si les frais de livraison ont été payés en ligne, ils rejoignent
+  // maintenant le portefeuille retirable du livreur (jamais avant, pour
+  // éviter qu'il soit payé sans avoir livré).
+  if (rows[0].courier_fee_payment_method === "cinetpay" && rows[0].courier_fee_paid) {
+    await pool.query("UPDATE profiles SET wallet_balance = wallet_balance + $1 WHERE role = 'courier' AND phone = $2", [Number(rows[0].delivery_fee) || 0, tokenPhone]);
+  }
   if (status === "livree") await settleVendorCommission(req.params.id);
   const { rows: r2 } = await pool.query("SELECT * FROM orders WHERE id = $1", [req.params.id]);
   res.json(mapOrder(r2[0]));
@@ -983,9 +1157,10 @@ app.get("/api/profiles/:role/:phone", async (req, res) => {
 // Crée le profil s'il n'existe pas (essai gratuit démarré maintenant), ou met juste à jour le nom sinon
 app.put("/api/profiles/:role/:phone", requirePhone((req) => req.params.phone), async (req, res) => {
   const { role, phone } = req.params;
-  const { name, password } = req.body;
+  const { name, password, referralCode } = req.body;
   const passwordHash = password ? hashPassword(password) : null;
   const { rows } = await pool.query("SELECT * FROM profiles WHERE role = $1 AND phone = $2", [role, phone]);
+  const isNewRegistration = !rows[0];
   if (rows[0]) {
     if (passwordHash) {
       await pool.query("UPDATE profiles SET name = $1, password_hash = $2 WHERE role = $3 AND phone = $4", [name, passwordHash, role, phone]);
@@ -998,6 +1173,7 @@ app.put("/api/profiles/:role/:phone", requirePhone((req) => req.params.phone), a
       [role, phone, name, Date.now(), passwordHash]
     );
   }
+  if (isNewRegistration && referralCode) recordReferralSignup(referralCode, phone, role);
   const { rows: r2 } = await pool.query("SELECT * FROM profiles WHERE role = $1 AND phone = $2", [role, phone]);
   res.json(mapProfile(r2[0]));
 });
@@ -1008,10 +1184,16 @@ app.post("/api/auth/login-password", async (req, res) => {
   const { role, phone, password } = req.body;
   if (!["buyer", "vendor", "courier"].includes(role)) return res.status(400).json({ error: "Rôle invalide." });
   if (!phone || !password) return res.status(400).json({ error: "Identifiant et mot de passe requis." });
+  const ip = req.ip || req.headers["x-forwarded-for"] || "unknown";
+  const blockedMin = passwordLoginLimiter.isBlocked(`${ip}:${phone}`);
+  if (blockedMin) return res.status(429).json({ error: `Trop de tentatives. Réessaie dans ${blockedMin} minute(s).` });
   const { rows } = await pool.query("SELECT * FROM profiles WHERE role = $1 AND phone = $2", [role, phone]);
   if (!rows[0] || !verifyPassword(password, rows[0].password_hash)) {
+    const blocked = passwordLoginLimiter.recordFailure(`${ip}:${phone}`);
+    logSecurityEvent(blocked ? "password_login_blocked" : "failed_password_login", `${role} · ${phone}`, ip);
     return res.status(401).json({ error: "Identifiant ou mot de passe incorrect." });
   }
+  passwordLoginLimiter.reset(`${ip}:${phone}`);
   const token = await issuePhoneToken(phone);
   res.json({ token, profile: mapProfile(rows[0]) });
 });
@@ -1529,7 +1711,7 @@ app.get("/api/admin/revenue", requireOwner, async (req, res) => {
 
 app.get("/api/admin/withdrawals", requireOwner, async (req, res) => {
   const { rows } = await pool.query("SELECT * FROM withdrawal_requests ORDER BY created_at DESC");
-  res.json(rows.map((r) => ({ id: r.id, amount: Number(r.amount), method: r.method, accountInfo: r.account_info, status: r.status, createdAt: Number(r.created_at), doneAt: r.done_at ? Number(r.done_at) : null, vendorPhone: r.vendor_phone || null })));
+  res.json(rows.map((r) => ({ id: r.id, amount: Number(r.amount), method: r.method, accountInfo: r.account_info, status: r.status, createdAt: Number(r.created_at), doneAt: r.done_at ? Number(r.done_at) : null, vendorPhone: r.vendor_phone || null, agentPhone: r.agent_phone || null })));
 });
 app.post("/api/admin/withdrawals", requireOwner, async (req, res) => {
   const { amount, method, accountInfo } = req.body;
@@ -1548,6 +1730,84 @@ app.post("/api/admin/withdrawals/:id/done", requireOwner, async (req, res) => {
   await pool.query("UPDATE withdrawal_requests SET status = 'done', done_at = $1 WHERE id = $2", [Date.now(), req.params.id]);
   logAdminAction("Retrait marqué comme effectué", req.params.id);
   res.json({ ok: true });
+});
+
+// ==================== AGENTS DE RECRUTEMENT (PARRAINAGE) ====================
+// Journal des événements de sécurité — tentatives de connexion échouées et
+// blocages, pour repérer une attaque en cours plutôt que la bloquer en silence.
+app.get("/api/admin/security-events", requireOwner, async (req, res) => {
+  const { rows } = await pool.query("SELECT * FROM security_events ORDER BY created_at DESC LIMIT 100");
+  res.json(rows.map((r) => ({ id: r.id, type: r.type, detail: r.detail, ip: r.ip, createdAt: Number(r.created_at) })));
+});
+
+app.get("/api/admin/agents", requireOwner, async (req, res) => {
+  const { rows: agents } = await pool.query("SELECT * FROM referral_agents ORDER BY created_at DESC");
+  const { rows: signups } = await pool.query("SELECT agent_phone, role, activated FROM referral_signups");
+  const result = agents.map((a) => {
+    const own = signups.filter((s) => s.agent_phone === a.phone);
+    const countActivated = (role) => own.filter((s) => s.role === role && s.activated).length;
+    const buyerN = countActivated("buyer"), vendorN = countActivated("vendor"), courierN = countActivated("courier");
+    const earned = buyerN * Number(a.rate_buyer) + vendorN * Number(a.rate_vendor) + courierN * Number(a.rate_courier);
+    return {
+      phone: a.phone, name: a.name, code: a.code, active: a.active,
+      rateBuyer: Number(a.rate_buyer), rateVendor: Number(a.rate_vendor), rateCourier: Number(a.rate_courier),
+      totalSignups: own.length,
+      activatedBuyers: buyerN, activatedVendors: vendorN, activatedCouriers: courierN,
+      totalEarned: earned,
+    };
+  });
+  res.json(result);
+});
+app.post("/api/admin/agents", requireOwner, async (req, res) => {
+  const { name, phone, code, rateBuyer, rateVendor, rateCourier } = req.body;
+  if (!name || !phone || !code) return res.status(400).json({ error: "Nom, téléphone et code requis." });
+  const normalizedCode = code.trim().toUpperCase();
+  const { rows: existing } = await pool.query("SELECT phone FROM referral_agents WHERE code = $1", [normalizedCode]);
+  if (existing[0]) return res.status(400).json({ error: "Ce code est déjà utilisé par un autre agent." });
+  await pool.query(
+    "INSERT INTO referral_agents (phone, name, code, rate_buyer, rate_vendor, rate_courier, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (phone) DO UPDATE SET name = $2, code = $3, rate_buyer = $4, rate_vendor = $5, rate_courier = $6",
+    [phone, name, normalizedCode, Number(rateBuyer) || 0, Number(rateVendor) || 0, Number(rateCourier) || 0, Date.now()]
+  );
+  res.json({ ok: true });
+});
+app.post("/api/admin/agents/:phone/toggle", requireOwner, async (req, res) => {
+  await pool.query("UPDATE referral_agents SET active = NOT active WHERE phone = $1", [req.params.phone]);
+  res.json({ ok: true });
+});
+
+// Un agent consulte ses propres statistiques (connexion par téléphone, même
+// mécanisme de jeton que pour acheteur/vendeur/livreur).
+app.get("/api/agents/:phone/stats", requirePhone((req) => req.params.phone), async (req, res) => {
+  const { rows: agentRows } = await pool.query("SELECT * FROM referral_agents WHERE phone = $1", [req.params.phone]);
+  if (!agentRows[0]) return res.status(404).json({ error: "Aucun profil agent pour ce numéro." });
+  const a = agentRows[0];
+  const { rows: signups } = await pool.query("SELECT role, activated FROM referral_signups WHERE agent_phone = $1", [req.params.phone]);
+  const countActivated = (role) => signups.filter((s) => s.role === role && s.activated).length;
+  const buyerN = countActivated("buyer"), vendorN = countActivated("vendor"), courierN = countActivated("courier");
+  const earned = buyerN * Number(a.rate_buyer) + vendorN * Number(a.rate_vendor) + courierN * Number(a.rate_courier);
+  const { rows: withdrawals } = await pool.query("SELECT * FROM withdrawal_requests WHERE agent_phone = $1 ORDER BY created_at DESC", [req.params.phone]);
+  const alreadyWithdrawn = withdrawals.filter((w) => w.status !== "cancelled").reduce((s, w) => s + Number(w.amount), 0);
+  res.json({
+    name: a.name, code: a.code,
+    totalSignups: signups.length,
+    activatedBuyers: buyerN, activatedVendors: vendorN, activatedCouriers: courierN,
+    totalEarned: earned,
+    availableToWithdraw: Math.max(0, earned - alreadyWithdrawn),
+    withdrawals: withdrawals.map((w) => ({ id: w.id, amount: Number(w.amount), method: w.method, status: w.status, createdAt: Number(w.created_at) })),
+  });
+});
+app.post("/api/agents/:phone/withdrawals", requirePhone((req) => req.params.phone), async (req, res) => {
+  const { amount, method, accountInfo } = req.body;
+  if (!amount || amount <= 0) return res.status(400).json({ error: "Indique un montant valide." });
+  if (!["bank", "mobile_money"].includes(method)) return res.status(400).json({ error: "Méthode invalide." });
+  if (!accountInfo) return res.status(400).json({ error: "Indique les coordonnées du compte de réception." });
+  const id = uid();
+  await pool.query(
+    "INSERT INTO withdrawal_requests (id, amount, method, account_info, status, created_at, agent_phone) VALUES ($1,$2,$3,$4,'pending',$5,$6)",
+    [id, amount, method, accountInfo, Date.now(), req.params.phone]
+  );
+  logAdminAction("Demande de retrait agent", req.params.phone, `${amount} F · ${method}`);
+  res.json({ ok: true, id });
 });
 
 // ==================== SÉQUESTRE VENDEUR (paiement en ligne retenu jusqu'à livraison) ====================
@@ -1597,6 +1857,34 @@ app.post("/api/vendors/:phone/withdrawals", requirePhone((req) => req.params.pho
     [id, amount, method, accountInfo, Date.now(), req.params.phone]
   );
   logAdminAction("Demande de retrait vendeur créée", req.params.phone, `${amount} F · ${method}`);
+  res.json({ ok: true, id });
+});
+
+// Frais de livraison payés en ligne — déjà crédités au portefeuille du
+// livreur à la confirmation (voir /confirm-courier), donc pas de calcul
+// pending/available complexe comme pour le vendeur : juste son solde.
+app.get("/api/couriers/:phone/revenue", requirePhone((req) => req.params.phone), async (req, res) => {
+  const { rows: prof } = await pool.query("SELECT wallet_balance FROM profiles WHERE role = 'courier' AND phone = $1", [req.params.phone]);
+  const balance = Number(prof[0]?.wallet_balance) || 0;
+  const { rows: pendingW } = await pool.query("SELECT amount FROM withdrawal_requests WHERE courier_phone = $1 AND status = 'pending'", [req.params.phone]);
+  const pendingWithdrawal = pendingW.reduce((s, w) => s + Number(w.amount || 0), 0);
+  res.json({ availableToWithdraw: Math.max(0, balance - pendingWithdrawal) });
+});
+app.get("/api/couriers/:phone/withdrawals", requirePhone((req) => req.params.phone), async (req, res) => {
+  const { rows } = await pool.query("SELECT * FROM withdrawal_requests WHERE courier_phone = $1 ORDER BY created_at DESC", [req.params.phone]);
+  res.json(rows.map((r) => ({ id: r.id, amount: Number(r.amount), method: r.method, accountInfo: r.account_info, status: r.status, createdAt: Number(r.created_at), doneAt: r.done_at ? Number(r.done_at) : null })));
+});
+app.post("/api/couriers/:phone/withdrawals", requirePhone((req) => req.params.phone), async (req, res) => {
+  const { amount, method, accountInfo } = req.body;
+  if (!amount || amount <= 0) return res.status(400).json({ error: "Indique un montant valide." });
+  if (!["bank", "mobile_money"].includes(method)) return res.status(400).json({ error: "Méthode invalide." });
+  if (!accountInfo) return res.status(400).json({ error: "Indique les coordonnées du compte de réception." });
+  const id = uid();
+  await pool.query(
+    "INSERT INTO withdrawal_requests (id, amount, method, account_info, status, created_at, courier_phone) VALUES ($1,$2,$3,$4,'pending',$5,$6)",
+    [id, amount, method, accountInfo, Date.now(), req.params.phone]
+  );
+  logAdminAction("Demande de retrait livreur créée", req.params.phone, `${amount} F · ${method}`);
   res.json({ ok: true, id });
 });
 
@@ -1770,6 +2058,11 @@ app.post("/api/cinetpay/notify", async (req, res) => {
         // autres paiements du site.
         await pool.query("UPDATE profiles SET wallet_balance = wallet_balance + $1 WHERE role = 'vendor' AND phone = $2", [Number(pending.amount) || 0, pending.phone]);
         logAdminAction("Portefeuille rechargé par le vendeur", pending.phone, `+${pending.amount} F`);
+      } else if (pending.kind === "courier_fee" && pending.order_id) {
+        // L'acheteur a payé les frais de livraison en ligne — l'argent reste
+        // bloqué chez le propriétaire jusqu'à la confirmation de livraison
+        // (code à 4 chiffres), qui le libère alors vers le livreur.
+        await pool.query("UPDATE orders SET courier_fee_paid = true, courier_fee_payment_method = 'cinetpay' WHERE id = $1", [pending.order_id]);
       }
       await pool.query("UPDATE pending_payments SET status = 'confirmed' WHERE transaction_id = $1", [transactionId]);
     } else {
@@ -1785,28 +2078,68 @@ app.post("/api/cinetpay/notify", async (req, res) => {
 // ==================== AUTH PROPRIÉTAIRE ====================
 // Protection contre les tentatives répétées (force brute) : après 5 essais
 // échoués depuis la même IP, blocage temporaire de 15 minutes.
-const ownerLoginAttempts = new Map(); // ip -> { count, blockedUntil }
-const OWNER_LOGIN_MAX_ATTEMPTS = 5;
-const OWNER_LOGIN_BLOCK_MS = 15 * 60 * 1000;
+const ownerLoginLimiter = makeRateLimiter(5, 15 * 60 * 1000);
 app.post("/api/owner/login", async (req, res) => {
   const ip = req.ip || req.headers["x-forwarded-for"] || "unknown";
-  const attempt = ownerLoginAttempts.get(ip);
-  if (attempt && attempt.blockedUntil && Date.now() < attempt.blockedUntil) {
-    const remainingMin = Math.ceil((attempt.blockedUntil - Date.now()) / 60000);
-    return res.status(429).json({ error: `Trop de tentatives. Réessaie dans ${remainingMin} minute(s).` });
-  }
+  const blockedMin = ownerLoginLimiter.isBlocked(ip);
+  if (blockedMin) return res.status(429).json({ error: `Trop de tentatives. Réessaie dans ${blockedMin} minute(s).` });
   const { code } = req.body;
   if (!OWNER_PASSCODE) return res.status(500).json({ error: "OWNER_PASSCODE non configuré sur le serveur." });
   if (code !== OWNER_PASSCODE) {
-    const count = (attempt?.count || 0) + 1;
-    ownerLoginAttempts.set(ip, {
-      count,
-      blockedUntil: count >= OWNER_LOGIN_MAX_ATTEMPTS ? Date.now() + OWNER_LOGIN_BLOCK_MS : null,
-    });
+    const blocked = ownerLoginLimiter.recordFailure(ip);
+    logSecurityEvent(blocked ? "owner_login_blocked" : "failed_owner_login", null, ip);
     return res.status(401).json({ error: "Code incorrect." });
   }
-  ownerLoginAttempts.delete(ip); // succès : on efface le compteur
+  ownerLoginLimiter.reset(ip);
   res.json({ token: await issueOwnerToken() });
+});
+
+// Petit assistant de questions générales pour le propriétaire — répond à
+// partir d'une connaissance générale de Zonako, mais ne peut ni modifier le
+// code ni déployer quoi que ce soit (contrairement à Claude en conversation).
+const ZONAKO_ASSISTANT_CONTEXT = `Tu es un assistant intégré au tableau de bord propriétaire de Zonako, une plateforme de e-commerce de proximité en Côte d'Ivoire (par zone géographique), avec trois rôles : acheteur, vendeur, livreur.
+Fonctionnalités clés de la plateforme :
+- Paiement en ligne (CinetPay) ou à la livraison ; séquestre des fonds jusqu'à confirmation de réception.
+- Fenêtre de réflexion de 10 minutes après commande avant que le vendeur puisse confirmer.
+- Système de litiges : l'acheteur peut contester une réception non conforme (photo à l'appui), le propriétaire tranche.
+- Confirmation automatique de réception après 3 jours d'inactivité de l'acheteur.
+- Expédition par compagnie de transport : paiement en ligne obligatoire (pas de paiement à la livraison), avec une deuxième fenêtre de réflexion de 10 minutes une fois l'accord de transport trouvé.
+- Portefeuille vendeur, demandes de retrait (Mobile Money / compte bancaire).
+- Outils IA pour les vendeurs : génération de description et d'accroche publicitaire, amélioration photo automatique, photo de présentation mode (mannequin).
+- Notifications comportementales par email (relance produit vu, baisse de prix sur favori, nouveauté dans une catégorie suivie) — email uniquement pour l'instant, pas SMS.
+- Application installable sur téléphone (PWA).
+- Annonces automatiques aux acheteurs (nouveau vendeur/produit) ou publiées manuellement.
+Réponds uniquement à des questions générales sur le fonctionnement de la plateforme ou des conseils généraux. Tu ne peux PAS modifier le code, déployer de changement, ni accéder aux vraies données de la base — pour tout problème technique réel ou toute modification, dis clairement à l'utilisateur de revenir dans sa conversation avec Claude (celle où la plateforme a été construite). Réponds en français, de façon concise (quelques phrases).`;
+app.post("/api/owner/assistant", requireOwner, async (req, res) => {
+  if (!ANTHROPIC_API_KEY) return res.status(500).json({ error: "L'assistant n'est pas encore configuré sur le serveur." });
+  const { question, history } = req.body;
+  if (!question || !question.trim()) return res.status(400).json({ error: "Écris une question." });
+  try {
+    const messages = [
+      ...(Array.isArray(history) ? history.slice(-6) : []),
+      { role: "user", content: question },
+    ];
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 400,
+        system: ZONAKO_ASSISTANT_CONTEXT,
+        messages,
+      }),
+    });
+    if (!r.ok) {
+      const detail = await r.text().catch(() => "");
+      throw new Error(`Anthropic a répondu ${r.status} : ${detail}`);
+    }
+    const data = await r.json();
+    const answer = (data.content || []).map((b) => b.text || "").join("").trim();
+    res.json({ answer });
+  } catch (e) {
+    console.error("Erreur pendant l'assistant propriétaire:", e);
+    res.status(500).json({ error: "Impossible de répondre pour l'instant." });
+  }
 });
 
 // Filet de sécurité pour les routes API : si une erreur passe jusqu'ici (au
@@ -1896,7 +2229,7 @@ async function processFavoritesAndViewReminders() {
   try {
     // Relance "vu mais pas acheté"
     const { rows: staleViews } = await pool.query(
-      `SELECT v.id, v.buyer_phone, v.product_id, p.name, p.price
+      `SELECT v.id, v.buyer_phone, v.product_id, p.name, p.price, p.image_url
        FROM product_views v JOIN products p ON p.id = v.product_id
        WHERE v.reminded = false AND v.viewed_at < $1`,
       [Date.now() - VIEW_REMINDER_DELAY_MS]
@@ -1910,12 +2243,18 @@ async function processFavoritesAndViewReminders() {
       );
       if (alreadyOrdered.length) continue;
       if (!(await canNotify(v.buyer_phone, "view_reminder"))) continue;
-      await sendEmail(v.buyer_phone, `Toujours envie de "${v.name}" ?`, `Tu as regardé "${v.name}" (${Number(v.price).toLocaleString("fr-FR")} F) sur Zonako il y a quelques jours — il est toujours disponible si tu veux le commander.\n\nzonabo-app.onrender.com`);
+      const priceTxt = Number(v.price).toLocaleString("fr-FR");
+      await sendEmail(
+        v.buyer_phone,
+        `Toujours envie de "${v.name}" ?`,
+        `Tu as regardé "${v.name}" (${priceTxt} F) sur Zonako il y a quelques jours — il est toujours disponible si tu veux le commander.\n\nzonabo-app.onrender.com`,
+        productEmailHtml({ heading: `Toujours envie de "${v.name}" ?`, imageUrl: v.image_url, bodyHtml: `Tu as regardé cet article (<strong>${priceTxt} F</strong>) sur Zonako il y a quelques jours — il est toujours disponible si tu veux le commander.` })
+      );
       await logNotification(v.buyer_phone, "view_reminder", v.product_id);
     }
     // Baisse de prix sur un favori
     const { rows: favs } = await pool.query(
-      `SELECT f.buyer_phone, f.product_id, f.last_known_price, p.name, p.price
+      `SELECT f.buyer_phone, f.product_id, f.last_known_price, p.name, p.price, p.image_url
        FROM favorites f JOIN products p ON p.id = f.product_id
        WHERE p.price < f.last_known_price`
     );
@@ -1923,7 +2262,14 @@ async function processFavoritesAndViewReminders() {
       await pool.query("UPDATE favorites SET last_known_price = $1 WHERE buyer_phone = $2 AND product_id = $3", [f.price, f.buyer_phone, f.product_id]);
       if (!looksLikeEmail(f.buyer_phone)) continue;
       if (!(await canNotify(f.buyer_phone, "price_drop"))) continue;
-      await sendEmail(f.buyer_phone, `Baisse de prix sur "${f.name}" !`, `Bonne nouvelle : "${f.name}" est passé de ${Number(f.last_known_price).toLocaleString("fr-FR")} F à ${Number(f.price).toLocaleString("fr-FR")} F sur Zonako.\n\nzonabo-app.onrender.com`);
+      const oldTxt = Number(f.last_known_price).toLocaleString("fr-FR");
+      const newTxt = Number(f.price).toLocaleString("fr-FR");
+      await sendEmail(
+        f.buyer_phone,
+        `Baisse de prix sur "${f.name}" !`,
+        `Bonne nouvelle : "${f.name}" est passé de ${oldTxt} F à ${newTxt} F sur Zonako.\n\nzonabo-app.onrender.com`,
+        productEmailHtml({ heading: `Baisse de prix sur "${f.name}" !`, imageUrl: f.image_url, bodyHtml: `Bonne nouvelle : cet article est passé de <s>${oldTxt} F</s> à <strong>${newTxt} F</strong> sur Zonako.` })
+      );
       await logNotification(f.buyer_phone, "price_drop", f.product_id);
     }
   } catch (e) {
@@ -1932,13 +2278,18 @@ async function processFavoritesAndViewReminders() {
 }
 
 // Nouveauté dans une catégorie suivie — déclenché directement à la publication.
-async function notifyCategoryFollowers(category, productId, productName, vendorName) {
+async function notifyCategoryFollowers(category, productId, productName, vendorName, imageUrl) {
   try {
     const { rows: followers } = await pool.query("SELECT buyer_phone FROM category_follows WHERE category = $1", [category]);
     for (const f of followers) {
       if (!looksLikeEmail(f.buyer_phone)) continue;
       if (!(await canNotify(f.buyer_phone, "category_new_product"))) continue;
-      await sendEmail(f.buyer_phone, `Nouveau dans ${category} sur Zonako`, `${vendorName} vient de publier "${productName}" dans la catégorie ${category} que tu suis.\n\nzonabo-app.onrender.com`);
+      await sendEmail(
+        f.buyer_phone,
+        `Nouveau dans ${category} sur Zonako`,
+        `${vendorName} vient de publier "${productName}" dans la catégorie ${category} que tu suis.\n\nzonabo-app.onrender.com`,
+        productEmailHtml({ heading: `Nouveau dans ${category}`, imageUrl, bodyHtml: `<strong>${vendorName}</strong> vient de publier "${productName}" dans la catégorie ${category} que tu suis.` })
+      );
       await logNotification(f.buyer_phone, "category_new_product", productId);
     }
   } catch (e) {
