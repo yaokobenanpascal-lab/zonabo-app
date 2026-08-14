@@ -586,6 +586,7 @@ function ProductGalleryModal({ product, onClose, buyerPhone }) {
   ];
   if (slides.length === 0) return null;
   const current = slides[index];
+  const isAiPhoto = current.type === "image" && (product.aiPhotoUrls || []).includes(current.url);
   return (
     <div className="fixed inset-0 bg-black/85 z-50 flex flex-col items-center justify-center p-4" onClick={onClose}>
       <button onClick={onClose} className="absolute top-4 right-4 text-white f-mono text-xs bg-white/10 px-3 py-1.5 rounded-full">Fermer ✕</button>
@@ -597,6 +598,9 @@ function ProductGalleryModal({ product, onClose, buyerPhone }) {
         )}
         {current.type === "buyer_image" && (
           <span className="absolute top-2 left-2 f-mono text-[10px] bg-[#2D6A4F] text-white px-2 py-1 rounded-full">✓ Photo d'un acheteur réel</span>
+        )}
+        {isAiPhoto && (
+          <span className="absolute top-2 left-2 f-mono text-[10px] bg-[#946B00] text-white px-2 py-1 rounded-full">📸 Photo de présentation</span>
         )}
         {slides.length > 1 && (
           <>
@@ -789,6 +793,112 @@ function DisputeOrConfirm({ orderId, buyerPhone, confirmLabel, onConfirm, onDisp
       <button disabled={busy} onClick={handleConfirm} className="w-full f-mono text-xs bg-[#2D6A4F] disabled:opacity-40 text-white py-1.5 rounded-full">{busy ? "…" : confirmLabel}</button>
       <button onClick={() => setShowForm(true)} className="w-full f-mono text-[10px] text-[#C1440E]/70 hover:text-[#C1440E] underline">⚠️ Ce n'est pas conforme à ce qui était annoncé</button>
       {error && <p className="f-body text-[10px] text-[#C1440E]">{error}</p>}
+    </div>
+  );
+}
+
+// Code de confirmation de livraison — visible uniquement par l'acheteur,
+// jamais transmis dans les données générales de commande (route séparée).
+// L'acheteur le donne au livreur au moment de la remise réelle du colis.
+// Choix du mode de paiement des frais de livraison — espèces à la remise
+// (par défaut) ou en ligne dès maintenant (bloqué chez le propriétaire,
+// débloqué au livreur seulement à la confirmation de livraison).
+function CourierFeeChoice({ order, onPayOnline }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [justPaid, setJustPaid] = useState(false);
+  async function handlePay() {
+    setBusy(true);
+    setError("");
+    try {
+      await onPayOnline(order);
+      setJustPaid(true);
+    } catch (e) {
+      setError(e.message || "Erreur pendant le paiement.");
+    }
+    setBusy(false);
+  }
+  if (order.courierFeePaid) {
+    return <p className="f-mono text-[10px] text-[#2D6A4F]">✓ Frais de livraison ({(order.deliveryFee || 0).toLocaleString("fr-FR")} F) déjà payés en ligne — rien à régler au livreur.</p>;
+  }
+  if (justPaid) {
+    return <p className="f-mono text-[10px] text-[#14213D]/50">Paiement reçu — vérification en cours…</p>;
+  }
+  if (order.status === "livree") {
+    return <p className="f-mono text-[10px] text-[#14213D]/50">Frais de livraison (réglés en espèces) : {(order.deliveryFee || 0).toLocaleString("fr-FR")} F</p>;
+  }
+  return (
+    <div className="mb-1">
+      <p className="f-mono text-[10px] text-[#14213D]/50">Frais de livraison (à régler au livreur) : {(order.deliveryFee || 0).toLocaleString("fr-FR")} F</p>
+      <button disabled={busy} onClick={handlePay} className="f-mono text-[10px] text-[#3B6FA0] hover:text-[#14213D] underline disabled:opacity-40">
+        {busy ? "…" : "Payer en ligne à la place"}
+      </button>
+      {error && <p className="f-body text-[9px] text-[#C1440E]">{error}</p>}
+    </div>
+  );
+}
+
+function DeliveryPinDisplay({ orderId, buyerPhone }) {
+  const [pin, setPin] = useState(null);
+  useEffect(() => {
+    apiSend(`/api/orders/${orderId}/pin?phone=${encodeURIComponent(buyerPhone)}`, "GET", undefined, getPhoneToken(buyerPhone))
+      .then((r) => setPin(r.pin))
+      .catch(() => {});
+  }, [orderId, buyerPhone]);
+  if (!pin) return null;
+  return (
+    <div className="bg-[#F2A93B]/15 border-2 border-[#F2A93B]/40 rounded-lg px-3 py-2 mt-1.5 text-center">
+      <p className="f-body text-[10px] text-[#14213D]/60">Donne ce code au livreur uniquement à la remise du colis</p>
+      <p className="f-display text-2xl font-bold text-[#14213D] tracking-widest">{pin}</p>
+    </div>
+  );
+}
+
+// Bouton "Marquer livrée" côté livreur — exige le code à 4 chiffres donné
+// par l'acheteur au moment de la remise réelle du colis.
+function CourierConfirmWithPin({ order, onConfirm }) {
+  const [showInput, setShowInput] = useState(false);
+  const [pin, setPin] = useState("");
+  const [paymentConfirmed, setPaymentConfirmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function handleConfirm() {
+    setBusy(true);
+    setError("");
+    try {
+      await onConfirm(order.id, pin, paymentConfirmed);
+    } catch (e) {
+      setError(e.message || "Erreur.");
+    }
+    setBusy(false);
+  }
+  if (!showInput) {
+    return (
+      <button onClick={() => setShowInput(true)} className="f-mono text-xs bg-[#2D6A4F] text-white px-3 py-1.5 rounded-full whitespace-nowrap">Marquer livrée</button>
+    );
+  }
+  const paidOnline = order.courierFeePaymentMethod === "cinetpay";
+  return (
+    <div className="flex flex-col items-end gap-1.5 max-w-[190px]">
+      <label className="flex items-start gap-1.5 text-right">
+        <input type="checkbox" checked={paymentConfirmed} onChange={(e) => setPaymentConfirmed(e.target.checked)} className="w-3.5 h-3.5 mt-0.5 accent-[#2D6A4F]" />
+        <span className="f-body text-[9px] text-[#14213D]">
+          {paidOnline ? "Je confirme que les frais ont bien été payés en ligne" : "Je confirme avoir bien reçu mon paiement en espèces"}
+        </span>
+      </label>
+      <div className="flex gap-1.5">
+        <input
+          placeholder="Code"
+          value={pin}
+          onChange={(e) => setPin(e.target.value)}
+          maxLength={4}
+          className="f-mono w-16 px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs text-center"
+        />
+        <button disabled={busy || pin.length !== 4 || !paymentConfirmed} onClick={handleConfirm} className="f-mono text-xs bg-[#2D6A4F] disabled:opacity-40 text-white px-3 py-1.5 rounded-full whitespace-nowrap">
+          {busy ? "…" : "Valider"}
+        </button>
+      </div>
+      {error && <p className="f-body text-[9px] text-[#C1440E]">{error}</p>}
     </div>
   );
 }
@@ -1320,9 +1430,14 @@ function Home({ setRole, content = {} }) {
           );
         })}
       </div>
-      <button onClick={() => setRole("owner")} className="f-mono text-xs text-[#14213D]/30 hover:text-[#14213D]/60 mt-10 inline-block">
-        Espace propriétaire →
-      </button>
+      <div className="flex gap-4 mt-10">
+        <button onClick={() => setRole("agent")} className="f-mono text-xs text-[#14213D]/30 hover:text-[#14213D]/60 inline-block">
+          Espace agent →
+        </button>
+        <button onClick={() => setRole("owner")} className="f-mono text-xs text-[#14213D]/30 hover:text-[#14213D]/60 inline-block">
+          Espace propriétaire →
+        </button>
+      </div>
     </div>
   );
 }
@@ -1341,7 +1456,7 @@ function getPhoneToken(phone) {
 function RegisterWithPhoneVerification({ title, subtitle, accentColor, onSubmit, role }) {
   const [authMode, setAuthMode] = useState("login"); // "login" (mot de passe) | "register" (code + création)
   const [mode, setMode] = useState("phone"); // "phone" | "email"
-  const [form, setForm] = useState({ name: "", phone: "", password: "" });
+  const [form, setForm] = useState({ name: "", phone: "", password: "", referralCode: "" });
   const [step, setStep] = useState("info"); // "info" | "code"
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1432,6 +1547,13 @@ function RegisterWithPhoneVerification({ title, subtitle, accentColor, onSubmit,
             placeholder="Crée un mot de passe (pour te reconnecter facilement)"
             value={form.password}
             onChange={(e) => setForm({ ...form, password: e.target.value })}
+            onFocus={keepInView}
+            className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-sm focus:outline-none"
+          />
+          <input
+            placeholder="Code de parrainage (facultatif)"
+            value={form.referralCode}
+            onChange={(e) => setForm({ ...form, referralCode: e.target.value })}
             onFocus={keepInView}
             className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-sm focus:outline-none"
           />
@@ -1543,7 +1665,7 @@ function ChangePhoneNumber({ role, info, accentColor, onChanged }) {
   );
 }
 
-function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, registerBuyer, logoutBuyer, placeOrder, cancelOrder, deleteMyOrder, showCart, setShowCart, myOrders, chooseCourierForOrder, confirmDeliveryByBuyer, disputeOrder, proposeTransport, confirmTransport, tip, announcementMessage, announcementProductId, announcementCreatedAt, announcementVideoUrl }) {
+function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, registerBuyer, logoutBuyer, placeOrder, cancelOrder, deleteMyOrder, showCart, setShowCart, myOrders, chooseCourierForOrder, confirmDeliveryByBuyer, disputeOrder, proposeTransport, confirmTransport, tip, announcementMessage, announcementProductId, announcementCreatedAt, announcementVideoUrl, payCourierFeeOnline }) {
   const [category, setCategory] = useState("");
   const [search, setSearch] = useState("");
   const [visibleCount, setVisibleCount] = useState(20);
@@ -1867,6 +1989,9 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                         🎥 {p.videoUrls && p.videoUrls.length > 1 ? p.videoUrls.length : "Vidéo"}
                       </span>
                     )}
+                    {!p.videoUrl && p.imageUrl && (p.aiPhotoUrls || []).includes(p.imageUrl) && (
+                      <span className="absolute bottom-1.5 left-1.5 f-mono text-[9px] bg-[#946B00]/90 text-white px-1.5 py-0.5 rounded-full">📸 Présentation</span>
+                    )}
                     {buyerInfo.phone && (
                       <button
                         onClick={(e) => { e.stopPropagation(); toggleFavorite(p.id); }}
@@ -1961,10 +2086,9 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
               )}
               {o.shippingMethod === "livreur" && o.courierName && (
                 <div className="mt-1">
-                  <p className="f-mono text-[10px] text-[#14213D]/50">
-                    Frais de livraison (à régler au livreur) : {(o.deliveryFee || 0).toLocaleString("fr-FR")} F
-                  </p>
+                  <CourierFeeChoice order={o} onPayOnline={payCourierFeeOnline} />
                   <CourierTrackingCard order={o} />
+                  {o.status === "en_livraison" && <DeliveryPinDisplay orderId={o.id} buyerPhone={buyerInfo.phone} />}
                   {o.status !== "livree" && !o.buyerConfirmed && (
                     <>
                       <DisputeOrConfirm orderId={o.id} buyerPhone={buyerInfo.phone} confirmLabel="J'ai reçu ma commande" onConfirm={confirmDeliveryByBuyer} onDispute={disputeOrder} />
@@ -2244,7 +2368,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
 
 function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addProduct, updateProduct, deleteProduct, orders, confirmOrder, cancelOrder, shipOrder, updateStatus, setRole, trialDays, accessFee, onPhoneChanged, proposeTransport, confirmTransport, tip }) {
   const [shipForm, setShipForm] = useState({}); // { [orderId]: { company, tracking } }
-  const [form, setForm] = useState({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrls: [], videoUrls: [], deliveryTime: "", description: "", tagline: "", vendorLandmark: vendorInfo.landmark || "" });
+  const [form, setForm] = useState({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrls: [], videoUrls: [], deliveryTime: "", description: "", tagline: "", aiPhotoUrls: [], vendorLandmark: vendorInfo.landmark || "" });
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [editingProfile, setEditingProfile] = useState(false);
@@ -2255,6 +2379,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
   const [descKeywords, setDescKeywords] = useState("");
   const [generatingMannequin, setGeneratingMannequin] = useState(false);
   const [displayType, setDisplayType] = useState("Vêtement femme");
+  const [mannequinPose, setMannequinPose] = useState("Trois-quarts");
   const [mannequinError, setMannequinError] = useState("");
   const [certifiedAccurate, setCertifiedAccurate] = useState(false);
   const [uploadingImg, setUploadingImg] = useState(false);
@@ -2339,10 +2464,10 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
 
   function startEdit(p) {
     setEditingId(p.id);
-    setEditForm({ price: p.price, stock: p.stock, deliveryTime: p.deliveryTime || "", imageUrls: p.imageUrls || (p.imageUrl ? [p.imageUrl] : []), videoUrls: p.videoUrls || (p.videoUrl ? [p.videoUrl] : []), description: p.description || "", vendorLandmark: p.vendorLandmark || "" });
+    setEditForm({ price: p.price, stock: p.stock, deliveryTime: p.deliveryTime || "", imageUrls: p.imageUrls || (p.imageUrl ? [p.imageUrl] : []), videoUrls: p.videoUrls || (p.videoUrl ? [p.videoUrl] : []), description: p.description || "", tagline: p.tagline || "", aiPhotoUrls: p.aiPhotoUrls || [], vendorLandmark: p.vendorLandmark || "" });
   }
   function saveEdit(id) {
-    updateProduct(id, { price: Number(editForm.price), stock: Number(editForm.stock), deliveryTime: editForm.deliveryTime || "Non précisé", imageUrls: editForm.imageUrls || [], videoUrls: editForm.videoUrls || [], description: editForm.description || "", vendorLandmark: editForm.vendorLandmark || "" });
+    updateProduct(id, { price: Number(editForm.price), stock: Number(editForm.stock), deliveryTime: editForm.deliveryTime || "Non précisé", imageUrls: editForm.imageUrls || [], videoUrls: editForm.videoUrls || [], description: editForm.description || "", tagline: editForm.tagline || "", aiPhotoUrls: editForm.aiPhotoUrls || [], vendorLandmark: editForm.vendorLandmark || "" });
     setEditingId(null);
   }
   async function handleImageUpload(file, target) {
@@ -2367,8 +2492,28 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
     if (target === "new") setUploadingImg(false); else setUploadingEditImg(false);
   }
   function removeImage(target, index) {
-    if (target === "new") setForm((f) => ({ ...f, imageUrls: f.imageUrls.filter((_, i) => i !== index) }));
-    else setEditForm((f) => ({ ...f, imageUrls: (f.imageUrls || []).filter((_, i) => i !== index) }));
+    if (target === "new") {
+      setForm((f) => {
+        const removedUrl = f.imageUrls[index];
+        const remaining = f.imageUrls.filter((_, i) => i !== index);
+        const realLeft = remaining.filter((u) => !f.aiPhotoUrls.includes(u));
+        if (remaining.length > 0 && realLeft.length === 0) {
+          setMannequinError("Il doit rester au moins une vraie photo de l'article — retire d'abord une photo générée par IA si tu veux tout remplacer.");
+          return f;
+        }
+        return { ...f, imageUrls: remaining, aiPhotoUrls: f.aiPhotoUrls.filter((u) => u !== removedUrl) };
+      });
+    } else {
+      setEditForm((f) => {
+        const imgs = f.imageUrls || [];
+        const removedUrl = imgs[index];
+        const remaining = imgs.filter((_, i) => i !== index);
+        const aiUrls = f.aiPhotoUrls || [];
+        const realLeft = remaining.filter((u) => !aiUrls.includes(u));
+        if (remaining.length > 0 && realLeft.length === 0) return f;
+        return { ...f, imageUrls: remaining, aiPhotoUrls: aiUrls.filter((u) => u !== removedUrl) };
+      });
+    }
   }
   async function generateDescription() {
     if (!form.name.trim()) { setPublishError("Donne d'abord un nom au produit."); return; }
@@ -2387,10 +2532,12 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
     setGeneratingMannequin(true);
     setMannequinError("");
     try {
-      const { imageUrl } = await apiSend("/api/products/generate-mannequin-photo", "POST", { vendorPhone: vendorInfo.phone, imageUrl: form.imageUrls[0], displayType }, getPhoneToken(vendorInfo.phone));
+      const { imageUrl } = await apiSend("/api/products/generate-mannequin-photo", "POST", { vendorPhone: vendorInfo.phone, imageUrl: form.imageUrls[0], displayType, pose: mannequinPose }, getPhoneToken(vendorInfo.phone));
       // La photo générée passe en premier (couverture) — c'est elle que
       // l'acheteur voit en premier, avant les photos brutes du vendeur.
-      if (form.imageUrls.length < 5) setForm((f) => ({ ...f, imageUrls: [imageUrl, ...f.imageUrls] }));
+      // On la marque aussi comme "générée par IA" pour le badge acheteur et
+      // pour ne jamais se retrouver sans aucune vraie photo.
+      if (form.imageUrls.length < 5) setForm((f) => ({ ...f, imageUrls: [imageUrl, ...f.imageUrls], aiPhotoUrls: [...f.aiPhotoUrls, imageUrl] }));
     } catch (e) {
       setMannequinError(e.message || "Impossible de générer la photo mannequin pour l'instant.");
     }
@@ -2694,20 +2841,38 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
               <p className="f-body text-[10px] text-[#14213D]/35 mt-1">Jusqu'à 5 photos — la première sert de couverture. Montre différents angles pour rassurer les acheteurs.</p>
               {form.imageUrls[0] && form.imageUrls.length < 5 && (
                 <div className="mt-2 bg-[#14213D]/5 rounded-lg p-2.5">
-                  <p className="f-mono text-[10px] uppercase tracking-wide text-[#14213D]/50 mb-1.5">✨ Photo de présentation mode (IA, expérimental)</p>
+                  <p className="f-mono text-[10px] uppercase tracking-wide text-[#14213D]/50 mb-1.5">✨ Photo de présentation produit (IA, expérimental)</p>
                   <select value={displayType} onChange={(e) => setDisplayType(e.target.value)} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-xs mb-1.5">
                     <option>Vêtement femme</option>
                     <option>Vêtement homme</option>
+                    <option>Costume / Tenue formelle</option>
+                    <option>Vêtement bébé / enfant</option>
                     <option>Chaussures</option>
                     <option>Montre</option>
                     <option>Bijoux</option>
                     <option>Sac / Accessoire</option>
+                    <option>Électronique / Téléphone</option>
+                    <option>Maison / Déco</option>
+                    <option>Cuisine / Ustensiles</option>
+                    <option>Beauté / Cosmétique</option>
+                    <option>Jouet / Enfant</option>
                   </select>
+                  {(displayType === "Vêtement femme" || displayType === "Vêtement homme" || displayType === "Costume / Tenue formelle") && (
+                    <select value={mannequinPose} onChange={(e) => setMannequinPose(e.target.value)} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-xs mb-1.5">
+                      <option>Face</option>
+                      <option>Trois-quarts</option>
+                      <option>Profil</option>
+                      <option>Dos</option>
+                    </select>
+                  )}
                   <button disabled={generatingMannequin} onClick={generateMannequinPhoto} className="w-full f-mono text-xs bg-[#14213D] disabled:opacity-40 text-white py-2 rounded-lg">
                     {generatingMannequin ? "Génération… (≈30-60s)" : "Générer une photo de présentation à partir de la 1ère photo"}
                   </button>
                   {mannequinError && <p className="f-body text-[10px] text-[#C1440E] mt-1">{mannequinError}</p>}
                   <p className="f-body text-[9px] text-[#14213D]/35 mt-1">Ajoute l'image générée à tes photos — à garder ou retirer librement. Fonctionnalité en test.</p>
+                  {form.aiPhotoUrls.length > 0 && (
+                    <p className="f-body text-[10px] text-[#946B00] bg-[#946B00]/10 rounded-lg px-2 py-1.5 mt-1.5">⚠️ Cette image est générée par IA, pas une photo réelle — assure-toi qu'elle reste fidèle à l'article (couleur, forme, détails) avant de publier. L'acheteur verra une mention discrète "Photo de présentation" dessus, et au moins une vraie photo doit toujours rester dans ta galerie.</p>
+                  )}
                 </div>
               )}
             </div>
@@ -2774,7 +2939,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                 setPublishError("");
                 try {
                   await addProduct({ ...form, price: Number(form.price), stock: Number(form.stock) || 0, deliveryTime: form.deliveryTime || "Non précisé", vendorName: vendorInfo.name, vendorPhone: vendorInfo.phone });
-                  setForm({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrls: [], videoUrls: [], deliveryTime: "", description: "", tagline: "", vendorLandmark: vendorInfo.landmark || "" });
+                  setForm({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrls: [], videoUrls: [], deliveryTime: "", description: "", tagline: "", aiPhotoUrls: [], vendorLandmark: vendorInfo.landmark || "" });
                   setCertifiedAccurate(false);
                 } catch (e) {
                   setPublishError(e.message || "Impossible de publier le produit. Réessaie.");
@@ -2946,6 +3111,156 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
   );
 }
 
+// Espace agent de recrutement — connexion simple par téléphone (vérification
+// par code), puis consultation de ses statistiques de parrainage et demande
+// de retrait. Pas d'auto-inscription : le compte doit déjà exister (créé par
+// le propriétaire) pour que la connexion fonctionne.
+function AgentView({ agentInfo, setAgentInfo, logoutAgent }) {
+  const [phone, setPhone] = useState("");
+  const [step, setStep] = useState("phone"); // "phone" | "code"
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [stats, setStats] = useState(null);
+  const [wMethod, setWMethod] = useState("mobile_money");
+  const [wAccount, setWAccount] = useState("");
+  const [wAmount, setWAmount] = useState("");
+  const [wBusy, setWBusy] = useState(false);
+  const [wMsg, setWMsg] = useState("");
+
+  async function loadStats(p) {
+    try {
+      const s = await apiSend(`/api/agents/${encodeURIComponent(p)}/stats`, "GET", undefined, getPhoneToken(p));
+      setStats(s);
+    } catch (e) {
+      setError(e.message || "Aucun compte agent trouvé pour ce numéro — contacte le propriétaire.");
+      logoutAgent();
+    }
+  }
+
+  useEffect(() => {
+    if (agentInfo.registered && agentInfo.phone) loadStats(agentInfo.phone);
+  }, [agentInfo.registered, agentInfo.phone]);
+
+  async function sendCode() {
+    setError(""); setBusy(true);
+    try {
+      await apiSend("/api/auth/send-code", "POST", { phone });
+      setStep("code");
+    } catch (e) {
+      setError(e.message || "Impossible d'envoyer le code.");
+    }
+    setBusy(false);
+  }
+  async function verify() {
+    setError(""); setBusy(true);
+    try {
+      const { token } = await apiSend("/api/auth/verify-code", "POST", { phone, code });
+      savePhoneToken(phone, token);
+      const next = { phone, registered: true };
+      setAgentInfo(next);
+      saveProfile("agent", next);
+    } catch {
+      setError("Code incorrect ou expiré.");
+    }
+    setBusy(false);
+  }
+  async function requestWithdrawal() {
+    setWBusy(true); setWMsg("");
+    try {
+      await apiSend(`/api/agents/${encodeURIComponent(agentInfo.phone)}/withdrawals`, "POST", { amount: Number(wAmount), method: wMethod, accountInfo: wAccount }, getPhoneToken(agentInfo.phone));
+      setWMsg("✓ Demande envoyée — le propriétaire va traiter ton retrait.");
+      setWAmount(""); setWAccount("");
+      loadStats(agentInfo.phone);
+    } catch (e) {
+      setWMsg(e.message || "Erreur pendant la demande.");
+    }
+    setWBusy(false);
+  }
+
+  if (!agentInfo.registered) {
+    return (
+      <div className="max-w-sm mx-auto px-4 py-8">
+        <h2 className="f-display font-semibold text-xl text-[#14213D] mb-1">Espace agent</h2>
+        <p className="f-body text-sm text-[#14213D]/50 mb-5">Connecte-toi avec le numéro enregistré par le propriétaire.</p>
+        {step === "phone" ? (
+          <div className="space-y-3" onKeyDown={(e) => { if (e.key === "Enter" && phone) sendCode(); }}>
+            <input placeholder="Ton numéro de téléphone" value={phone} onChange={(e) => setPhone(e.target.value)} className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-sm focus:outline-none" />
+            {error && <p className="f-body text-xs text-[#C1440E]">{error}</p>}
+            <button disabled={!phone || busy} onClick={sendCode} className="w-full bg-[#14213D] disabled:opacity-30 text-white f-display font-semibold py-3 rounded-full text-sm">
+              {busy ? "Envoi…" : "Recevoir mon code"}
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-3" onKeyDown={(e) => { if (e.key === "Enter" && code) verify(); }}>
+            <input placeholder="Code reçu" value={code} onChange={(e) => setCode(e.target.value)} className="f-body w-full px-3 py-2.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-sm focus:outline-none" />
+            {error && <p className="f-body text-xs text-[#C1440E]">{error}</p>}
+            <button disabled={!code || busy} onClick={verify} className="w-full bg-[#14213D] disabled:opacity-30 text-white f-display font-semibold py-3 rounded-full text-sm">
+              {busy ? "Vérification…" : "Confirmer"}
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (!stats) return <div className="max-w-sm mx-auto px-4 py-8 text-center f-body text-sm text-[#14213D]/40">Chargement…</div>;
+
+  return (
+    <div className="max-w-md mx-auto px-4 py-8">
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="f-display font-semibold text-xl text-[#14213D]">Bonjour, {stats.name}</h2>
+        <button onClick={logoutAgent} className="f-mono text-[11px] text-[#14213D]/40 hover:text-[#C1440E]">Changer de compte</button>
+      </div>
+      <p className="f-mono text-[11px] text-[#14213D]/40 mb-4">Ton code de parrainage : <strong className="text-[#14213D]">{stats.code}</strong></p>
+
+      <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-4">
+        <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/50 mb-2">Inscriptions actives</p>
+        <div className="grid grid-cols-3 gap-2 text-center">
+          <div><p className="f-display text-xl font-semibold text-[#14213D]">{stats.activatedBuyers}</p><p className="f-body text-[10px] text-[#14213D]/40">Acheteurs</p></div>
+          <div><p className="f-display text-xl font-semibold text-[#14213D]">{stats.activatedVendors}</p><p className="f-body text-[10px] text-[#14213D]/40">Vendeurs</p></div>
+          <div><p className="f-display text-xl font-semibold text-[#14213D]">{stats.activatedCouriers}</p><p className="f-body text-[10px] text-[#14213D]/40">Livreurs</p></div>
+        </div>
+        <p className="f-body text-[10px] text-[#14213D]/35 mt-2">{stats.totalSignups} inscription(s) au total via ton code — payées seulement une fois la personne réellement active.</p>
+      </div>
+
+      <div className="ticket bg-[#14213D] p-4 mb-4">
+        <p className="f-mono text-[11px] uppercase tracking-wide text-[#F2A93B] mb-1">Gains</p>
+        <p className="f-display text-2xl font-semibold text-white">{stats.totalEarned.toLocaleString("fr-FR")} F</p>
+        <p className="f-body text-xs text-white/60 mt-1">{stats.availableToWithdraw.toLocaleString("fr-FR")} F disponibles au retrait</p>
+      </div>
+
+      {stats.availableToWithdraw > 0 && (
+        <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-4">
+          <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/50 mb-2">Demander un retrait</p>
+          <input type="number" placeholder={`Montant (max ${stats.availableToWithdraw.toLocaleString("fr-FR")} F)`} value={wAmount} onChange={(e) => setWAmount(e.target.value)} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm mb-2" />
+          <select value={wMethod} onChange={(e) => setWMethod(e.target.value)} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 bg-white text-sm mb-2">
+            <option value="mobile_money">Mobile Money</option>
+            <option value="bank">Compte bancaire</option>
+          </select>
+          <input placeholder="Numéro Mobile Money / IBAN" value={wAccount} onChange={(e) => setWAccount(e.target.value)} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm mb-2" />
+          {wMsg && <p className="f-body text-xs text-[#2D6A4F] mb-2">{wMsg}</p>}
+          <button disabled={wBusy || !wAmount || !wAccount || Number(wAmount) > stats.availableToWithdraw} onClick={requestWithdrawal} className="w-full f-mono text-xs bg-[#2D6A4F] disabled:opacity-40 text-white py-2.5 rounded-full">
+            {wBusy ? "…" : "Demander un retrait"}
+          </button>
+        </div>
+      )}
+
+      {stats.withdrawals.length > 0 && (
+        <div className="ticket bg-white border-2 border-[#14213D]/10 p-4">
+          <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/50 mb-2">Historique des retraits</p>
+          {stats.withdrawals.map((w) => (
+            <div key={w.id} className="flex justify-between text-xs py-1.5 border-b border-dashed border-[#14213D]/10 last:border-0">
+              <span className="text-[#14213D]">{w.amount.toLocaleString("fr-FR")} F</span>
+              <span className={w.status === "done" ? "text-[#2D6A4F]" : "text-[#14213D]/40"}>{w.status === "done" ? "✓ Effectué" : "En attente"}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CourierView({ courierInfo, registerCourier, logoutCourier, orders, submitCourierBid, updateStatus, confirmDeliveryByCourier, trialDays, accessFee, onPhoneChanged, tip }) {
   const [zone, setZone] = useState("");
   const [feeInputs, setFeeInputs] = useState({}); // { [orderId]: proposedFee }
@@ -2962,6 +3277,47 @@ function CourierView({ courierInfo, registerCourier, logoutCourier, orders, subm
   const mine = orders.filter((o) => o.courierPhone === courierInfo.phone && o.status !== "livree" && o.status !== "annulee");
   const delivered = orders.filter((o) => o.courierPhone === courierInfo.phone && o.status === "livree");
   const activeTracked = mine.find((o) => o.status === "en_livraison" && o.shippingMethod !== "transport");
+  const [courierRevenue, setCourierRevenue] = useState(null);
+  const [cWithdrawals, setCWithdrawals] = useState([]);
+  const [showCWithdrawals, setShowCWithdrawals] = useState(false);
+  const [cwAmount, setCwAmount] = useState("");
+  const [cwMethod, setCwMethod] = useState("mobile_money");
+  const [cwAccountInfo, setCwAccountInfo] = useState("");
+  const [cwBusy, setCwBusy] = useState(false);
+  const [cwError, setCwError] = useState("");
+
+  async function loadCourierRevenue() {
+    try {
+      const token = getPhoneToken(courierInfo.phone);
+      const [r, w] = await Promise.all([
+        apiSend(`/api/couriers/${encodeURIComponent(courierInfo.phone)}/revenue`, "GET", undefined, token),
+        apiSend(`/api/couriers/${encodeURIComponent(courierInfo.phone)}/withdrawals`, "GET", undefined, token),
+      ]);
+      setCourierRevenue(r);
+      setCWithdrawals(w);
+    } catch (e) {
+      console.error("Erreur de chargement du solde livreur:", e);
+    }
+  }
+  useEffect(() => { if (courierInfo.phone) loadCourierRevenue(); }, [courierInfo.phone]);
+
+  async function requestCourierWithdrawal() {
+    setCwError("");
+    const amount = Number(cwAmount);
+    if (!amount || amount <= 0) { setCwError("Indique un montant valide."); return; }
+    if (!cwAccountInfo.trim()) { setCwError("Indique les coordonnées du compte de réception."); return; }
+    setCwBusy(true);
+    try {
+      const token = getPhoneToken(courierInfo.phone);
+      await apiSend(`/api/couriers/${encodeURIComponent(courierInfo.phone)}/withdrawals`, "POST", { amount, method: cwMethod, accountInfo: cwAccountInfo.trim() }, token);
+      setCwAmount("");
+      setCwAccountInfo("");
+      loadCourierRevenue();
+    } catch (e) {
+      setCwError(e.message || "Erreur pendant la demande de retrait.");
+    }
+    setCwBusy(false);
+  }
 
   async function saveVehicle() {
     setSavingVehicle(true);
@@ -3090,6 +3446,51 @@ function CourierView({ courierInfo, registerCourier, logoutCourier, orders, subm
         </div>
       )}
 
+      {courierRevenue && (
+        <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-5">
+          <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-1">💳 Frais de livraison payés en ligne</p>
+          <p className="f-body text-[11px] text-[#14213D]/40 mb-3">Quand un acheteur paie tes frais en ligne (au lieu d'espèces), l'argent rejoint ton solde ici dès que tu confirmes la livraison.</p>
+          <p className="f-mono text-[9px] uppercase text-[#14213D]/40">Disponible pour retrait</p>
+          <p className="f-display font-semibold text-lg text-[#2D6A4F] mb-2">{Math.round(courierRevenue.availableToWithdraw).toLocaleString("fr-FR")} F</p>
+          {courierRevenue.availableToWithdraw > 0 && (
+            <div className="space-y-2 mb-2">
+              <div className="grid grid-cols-2 gap-2">
+                <input type="number" placeholder="Montant (FCFA)" value={cwAmount} onChange={(e) => setCwAmount(e.target.value)} className="f-body px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm" />
+                <select value={cwMethod} onChange={(e) => setCwMethod(e.target.value)} className="f-body px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm bg-white">
+                  <option value="mobile_money">Mobile Money</option>
+                  <option value="bank">Compte bancaire</option>
+                </select>
+              </div>
+              <input placeholder={cwMethod === "bank" ? "Numéro de compte / IBAN" : "Numéro Mobile Money"} value={cwAccountInfo} onChange={(e) => setCwAccountInfo(e.target.value)} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm" />
+              {cwError && <p className="f-body text-xs text-[#C1440E]">{cwError}</p>}
+              <button disabled={cwBusy} onClick={requestCourierWithdrawal} className="w-full f-mono text-xs bg-[#2D6A4F] disabled:opacity-40 text-white py-2.5 rounded-full">
+                {cwBusy ? "…" : "Demander un retrait"}
+              </button>
+            </div>
+          )}
+          {courierRevenue.availableToWithdraw <= 0 && (
+            <p className="f-body text-xs text-[#14213D]/40">Rien à retirer pour l'instant — les frais réglés en espèces ne passent pas par ici.</p>
+          )}
+          {cWithdrawals.length > 0 && (
+            <>
+              <button onClick={() => setShowCWithdrawals((s) => !s)} className="f-mono text-[10px] text-[#14213D]/40 hover:text-[#14213D] underline mt-1">
+                {showCWithdrawals ? "Masquer l'historique" : "Voir l'historique des retraits"}
+              </button>
+              {showCWithdrawals && (
+                <div className="mt-2 space-y-1.5">
+                  {cWithdrawals.map((w) => (
+                    <div key={w.id} className="flex justify-between text-xs py-1 border-b border-dashed border-[#14213D]/10 last:border-0">
+                      <span className="text-[#14213D]">{w.amount.toLocaleString("fr-FR")} F</span>
+                      <span className={w.status === "done" ? "text-[#2D6A4F]" : "text-[#14213D]/40"}>{w.status === "done" ? "✓ Effectué" : "En attente"}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
       {mine.length > 0 && (
         <>
           <h3 className="f-display font-semibold text-sm text-[#14213D] mb-3">Mes livraisons en cours</h3>
@@ -3115,7 +3516,7 @@ function CourierView({ courierInfo, registerCourier, logoutCourier, orders, subm
                     <p className="f-mono text-xs text-[#2D6A4F] font-semibold">Tes frais de livraison : {(o.deliveryFee || 0).toLocaleString("fr-FR")} F</p>
                   </div>
                   {!o.courierConfirmed && (
-                    <button onClick={() => confirmDeliveryByCourier(o.id)} className="f-mono text-xs bg-[#2D6A4F] text-white px-3 py-1.5 rounded-full whitespace-nowrap">Marquer livrée</button>
+                    <CourierConfirmWithPin order={o} onConfirm={confirmDeliveryByCourier} />
                   )}
                 </div>
                 {o.courierConfirmed && (
@@ -3331,6 +3732,61 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
   const [showNotes, setShowNotes] = useState(false);
   const [disputes, setDisputes] = useState([]);
   const [announcementDraft, setAnnouncementDraft] = useState("");
+  const [assistantMessages, setAssistantMessages] = useState([]);
+  const [agents, setAgents] = useState([]);
+  const [securityEvents, setSecurityEvents] = useState([]);
+  async function loadSecurityEvents() {
+    try {
+      setSecurityEvents(await apiSend("/api/admin/security-events", "GET", undefined, ownerToken));
+    } catch (e) {
+      console.error("Erreur de chargement des événements de sécurité:", e);
+    }
+  }
+  useEffect(() => { if (ownerToken) loadSecurityEvents(); }, [ownerToken]);
+  const [agentForm, setAgentForm] = useState({ name: "", phone: "", code: "", rateBuyer: "", rateVendor: "", rateCourier: "" });
+  const [agentBusy, setAgentBusy] = useState(false);
+  const [agentMsg, setAgentMsg] = useState("");
+  async function loadAgents() {
+    try {
+      setAgents(await apiSend("/api/admin/agents", "GET", undefined, ownerToken));
+    } catch (e) {
+      console.error("Erreur de chargement des agents:", e);
+    }
+  }
+  useEffect(() => { if (ownerToken) loadAgents(); }, [ownerToken]);
+  async function createAgent() {
+    setAgentBusy(true);
+    setAgentMsg("");
+    try {
+      await apiSend("/api/admin/agents", "POST", agentForm, ownerToken);
+      setAgentForm({ name: "", phone: "", code: "", rateBuyer: "", rateVendor: "", rateCourier: "" });
+      loadAgents();
+    } catch (e) {
+      setAgentMsg(e.message || "Erreur pendant la création de l'agent.");
+    }
+    setAgentBusy(false);
+  }
+  async function toggleAgent(phone) {
+    await apiSend(`/api/admin/agents/${encodeURIComponent(phone)}/toggle`, "POST", undefined, ownerToken);
+    loadAgents();
+  }
+  const [assistantInput, setAssistantInput] = useState("");
+  const [assistantBusy, setAssistantBusy] = useState(false);
+  async function askAssistant() {
+    const question = assistantInput.trim();
+    if (!question) return;
+    const history = assistantMessages.map((m) => ({ role: m.role, content: m.content }));
+    setAssistantMessages((m) => [...m, { role: "user", content: question }]);
+    setAssistantInput("");
+    setAssistantBusy(true);
+    try {
+      const { answer } = await apiSend("/api/owner/assistant", "POST", { question, history }, ownerToken);
+      setAssistantMessages((m) => [...m, { role: "assistant", content: answer }]);
+    } catch (e) {
+      setAssistantMessages((m) => [...m, { role: "assistant", content: e.message || "Erreur — réessaie dans un instant." }]);
+    }
+    setAssistantBusy(false);
+  }
   const [announcementProductId, setAnnouncementProductId] = useState("");
   const [announcementBusy, setAnnouncementBusy] = useState(false);
   useEffect(() => { setAnnouncementDraft(siteContent.announcementMessage || ""); setAnnouncementProductId(siteContent.announcementProductId || ""); }, [siteContent.announcementMessage]);
@@ -3707,6 +4163,7 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
                   <p className="f-body text-xs text-[#14213D]">
                     {Math.round(w.amount).toLocaleString("fr-FR")} F · {w.method === "bank" ? "Banque" : "Mobile Money"}
                     {w.vendorPhone && <span className="f-mono text-[9px] bg-[#2D6A4F]/10 text-[#2D6A4F] px-1.5 py-0.5 rounded ml-1.5">Vendeur · {w.vendorPhone}</span>}
+                    {w.agentPhone && <span className="f-mono text-[9px] bg-[#F2A93B]/20 text-[#946B00] px-1.5 py-0.5 rounded ml-1.5">Agent · {w.agentPhone}</span>}
                   </p>
                   <p className="f-mono text-[9px] text-[#14213D]/40">{w.accountInfo} · {new Date(w.createdAt).toLocaleDateString("fr-FR")}</p>
                 </div>
@@ -3808,6 +4265,73 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
       </div>
 
       <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
+        <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-1">🤝 Agents de recrutement</p>
+        <p className="f-body text-xs text-[#14213D]/50 mb-3">Chaque agent recrute avec son propre code — payé seulement quand la personne recrutée devient réellement active (première commande livrée, premier produit publié, première livraison confirmée), pas à la simple inscription.</p>
+
+        <div className="bg-[#14213D]/5 rounded-lg p-3 mb-4">
+          <p className="f-mono text-[10px] uppercase tracking-wide text-[#14213D]/50 mb-2">Nouvel agent</p>
+          <div className="grid grid-cols-2 gap-2 mb-2">
+            <input placeholder="Nom" value={agentForm.name} onChange={(e) => setAgentForm({ ...agentForm, name: e.target.value })} className="f-body px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
+            <input placeholder="Téléphone" value={agentForm.phone} onChange={(e) => setAgentForm({ ...agentForm, phone: e.target.value })} className="f-body px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
+          </div>
+          <input placeholder="Code de parrainage (ex: PASCAL10)" value={agentForm.code} onChange={(e) => setAgentForm({ ...agentForm, code: e.target.value.toUpperCase() })} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs mb-2" />
+          <p className="f-mono text-[9px] uppercase text-[#14213D]/35 mb-1">Commission par inscription activée (FCFA)</p>
+          <div className="grid grid-cols-3 gap-2 mb-2">
+            <input type="number" placeholder="Acheteur" value={agentForm.rateBuyer} onChange={(e) => setAgentForm({ ...agentForm, rateBuyer: e.target.value })} className="f-body px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
+            <input type="number" placeholder="Vendeur" value={agentForm.rateVendor} onChange={(e) => setAgentForm({ ...agentForm, rateVendor: e.target.value })} className="f-body px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
+            <input type="number" placeholder="Livreur" value={agentForm.rateCourier} onChange={(e) => setAgentForm({ ...agentForm, rateCourier: e.target.value })} className="f-body px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
+          </div>
+          {agentMsg && <p className="f-body text-[10px] text-[#C1440E] mb-2">{agentMsg}</p>}
+          <button disabled={agentBusy || !agentForm.name || !agentForm.phone || !agentForm.code} onClick={createAgent} className="w-full f-mono text-xs bg-[#14213D] disabled:opacity-40 text-white py-2 rounded-lg">
+            {agentBusy ? "…" : "Créer l'agent"}
+          </button>
+        </div>
+
+        {agents.length === 0 ? (
+          <p className="f-body text-xs text-[#14213D]/40">Aucun agent pour l'instant.</p>
+        ) : (
+          <div className="space-y-2">
+            {agents.map((a) => (
+              <div key={a.phone} className={`border-2 rounded-xl p-3 ${a.active ? "border-[#14213D]/10" : "border-[#C1440E]/20 opacity-50"}`}>
+                <div className="flex items-center justify-between">
+                  <p className="f-body text-sm font-semibold text-[#14213D]">{a.name} <span className="f-mono text-[10px] text-[#14213D]/40">· {a.code}</span></p>
+                  <button onClick={() => toggleAgent(a.phone)} className="f-mono text-[10px] text-[#14213D]/40 hover:text-[#C1440E] underline">{a.active ? "Désactiver" : "Réactiver"}</button>
+                </div>
+                <p className="f-mono text-[10px] text-[#14213D]/50 mt-1">{a.phone} — {a.activatedBuyers} acheteurs · {a.activatedVendors} vendeurs · {a.activatedCouriers} livreurs actifs ({a.totalSignups} inscrits au total)</p>
+                <p className="f-body text-xs text-[#2D6A4F] font-semibold mt-1">{a.totalEarned.toLocaleString("fr-FR")} F gagnés</p>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
+        <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-1">💬 Assistant — questions générales</p>
+        <p className="f-body text-xs text-[#14213D]/50 mb-3">Pour comprendre le fonctionnement de la plateforme ou avoir un conseil rapide. Pour un vrai problème technique ou une modification, reviens dans ta conversation avec Claude.</p>
+        {assistantMessages.length > 0 && (
+          <div className="space-y-2 mb-3 max-h-72 overflow-y-auto">
+            {assistantMessages.map((m, i) => (
+              <div key={i} className={`text-xs p-2.5 rounded-lg ${m.role === "user" ? "bg-[#14213D]/5 text-[#14213D] ml-8" : "bg-[#F2A93B]/10 text-[#14213D] mr-8"}`}>
+                {m.content}
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="flex gap-2">
+          <input
+            placeholder="Ex : Comment fonctionne la fenêtre de réflexion ?"
+            value={assistantInput}
+            onChange={(e) => setAssistantInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !assistantBusy) askAssistant(); }}
+            className="f-body flex-1 px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm"
+          />
+          <button disabled={assistantBusy || !assistantInput.trim()} onClick={askAssistant} className="f-mono text-xs bg-[#14213D] disabled:opacity-40 text-white px-4 py-2 rounded-lg whitespace-nowrap">
+            {assistantBusy ? "…" : "Envoyer"}
+          </button>
+        </div>
+      </div>
+
+      <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
         <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-1">📣 Annonce à tous les acheteurs</p>
         <p className="f-body text-xs text-[#14213D]/50 mb-3">Se publie <strong>automatiquement</strong> à chaque nouveau vendeur ou nouveau produit — pas besoin d'être connecté. Écris ici seulement si tu veux annoncer autre chose toi-même (ça remplace l'annonce automatique jusqu'à la prochaine nouveauté).</p>
         <textarea placeholder="Ex : Un nouveau vendeur d'électronique vient de rejoindre Zonako à Abengourou ! 🎉" value={announcementDraft} onChange={(e) => setAnnouncementDraft(e.target.value)} rows={2} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm mb-2" />
@@ -3874,6 +4398,35 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
         <button disabled={contentSaving} onClick={saveContent} className="w-full mt-4 f-mono text-xs bg-[#14213D] disabled:opacity-40 text-white py-2.5 rounded-full">
           {contentSaving ? "Enregistrement…" : "Enregistrer le contenu"}
         </button>
+      </div>
+
+      <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
+        <div className="flex items-center justify-between mb-1">
+          <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60">🛡️ Sécurité — activité suspecte récente</p>
+          <button onClick={loadSecurityEvents} className="f-mono text-[10px] text-[#14213D]/40 hover:text-[#14213D] underline">Actualiser</button>
+        </div>
+        <p className="f-body text-xs text-[#14213D]/50 mb-3">Tentatives de connexion échouées et blocages automatiques (mot de passe, code propriétaire) — pour repérer une attaque en cours.</p>
+        {securityEvents.length === 0 ? (
+          <p className="f-body text-xs text-[#14213D]/40">Aucun événement suspect détecté récemment. ✓</p>
+        ) : (
+          <div className="space-y-1.5 max-h-56 overflow-y-auto">
+            {securityEvents.map((e) => {
+              const labels = {
+                failed_owner_login: ["Code propriétaire incorrect", "#14213D"],
+                owner_login_blocked: ["🚫 IP bloquée — trop d'essais (code propriétaire)", "#C1440E"],
+                failed_password_login: ["Mot de passe incorrect", "#14213D"],
+                password_login_blocked: ["🚫 Compte bloqué temporairement — trop d'essais", "#C1440E"],
+              };
+              const [label, color] = labels[e.type] || [e.type, "#14213D"];
+              return (
+                <div key={e.id} className="flex items-center justify-between text-xs border-b border-dashed border-[#14213D]/10 pb-1.5">
+                  <span style={{ color }}>{label}{e.detail ? ` · ${e.detail}` : ""}</span>
+                  <span className="f-mono text-[9px] text-[#14213D]/35">{e.ip} · {new Date(e.createdAt).toLocaleString("fr-FR")}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       <div className="ticket bg-white border-2 border-[#C1440E]/30 p-4 mb-6">
@@ -4090,6 +4643,7 @@ function App() {
   const [buyerInfo, setBuyerInfo] = useState({ name: "", phone: "", registered: false });
   const [vendorInfo, setVendorInfo] = useState({ name: "", phone: "", registered: false });
   const [courierInfo, setCourierInfo] = useState({ name: "", phone: "", registered: false });
+  const [agentInfo, setAgentInfo] = useState({ phone: "", registered: false });
   const [feeRate, setFeeRate] = useState(DEFAULT_FEE_RATE);
   const [accessFee, setAccessFee] = useState(DEFAULT_ACCESS_FEE);
   const [trialDays, setTrialDays] = useState(DEFAULT_TRIAL_DAYS);
@@ -4171,7 +4725,7 @@ function App() {
     setBuyerInfo(next);
     saveProfile("buyer", next);
     try {
-      const profile = await apiSend(`/api/profiles/buyer/${encodeURIComponent(info.phone)}`, "PUT", { name: info.name, password: info.password }, getPhoneToken(info.phone));
+      const profile = await apiSend(`/api/profiles/buyer/${encodeURIComponent(info.phone)}`, "PUT", { name: info.name, password: info.password, referralCode: info.referralCode }, getPhoneToken(info.phone));
       setBuyerInfo((cur) => ({ ...cur, ...profile, registered: true }));
     } catch (e) {
       console.error("Erreur d'inscription acheteur:", e);
@@ -4182,7 +4736,7 @@ function App() {
     setVendorInfo(merged);
     saveProfile("vendor", merged);
     try {
-      const profile = await apiSend(`/api/profiles/vendor/${encodeURIComponent(info.phone)}`, "PUT", { name: info.name, password: info.password }, getPhoneToken(info.phone));
+      const profile = await apiSend(`/api/profiles/vendor/${encodeURIComponent(info.phone)}`, "PUT", { name: info.name, password: info.password, referralCode: info.referralCode }, getPhoneToken(info.phone));
       setVendorInfo((cur) => ({ ...cur, ...profile, registered: true }));
     } catch (e) {
       console.error("Erreur d'inscription vendeur:", e);
@@ -4193,7 +4747,7 @@ function App() {
     setCourierInfo(merged);
     saveProfile("courier", merged);
     try {
-      const profile = await apiSend(`/api/profiles/courier/${encodeURIComponent(info.phone)}`, "PUT", { name: info.name, password: info.password }, getPhoneToken(info.phone));
+      const profile = await apiSend(`/api/profiles/courier/${encodeURIComponent(info.phone)}`, "PUT", { name: info.name, password: info.password, referralCode: info.referralCode }, getPhoneToken(info.phone));
       setCourierInfo((cur) => ({ ...cur, ...profile, registered: true }));
     } catch (e) {
       console.error("Erreur d'inscription livreur:", e);
@@ -4215,6 +4769,7 @@ function App() {
   function logoutBuyer() { setBuyerInfo({ name: "", phone: "", registered: false }); clearProfile("buyer"); }
   function logoutVendor() { setVendorInfo({ name: "", phone: "", registered: false }); clearProfile("vendor"); }
   function logoutCourier() { setCourierInfo({ name: "", phone: "", registered: false }); clearProfile("courier"); }
+  function logoutAgent() { setAgentInfo({ phone: "", registered: false }); clearProfile("agent"); }
 
   // NB : il n'y a plus de fonction "activer l'abonnement" appelable côté client —
   // ça permettrait de s'abonner sans payer. L'activation se fait uniquement dans
@@ -4352,13 +4907,30 @@ function App() {
   // Double confirmation de réception (mode livreur) : le livreur confirme avoir
   // livré, l'acheteur confirme avoir reçu — indépendamment. La commande ne passe
   // "livrée" que quand les deux ont confirmé, et le vendeur voit les deux statuts.
-  async function confirmDeliveryByCourier(id) {
-    const updated = await apiSend(`/api/orders/${id}/confirm-courier`, "POST", undefined, getPhoneToken(courierInfo.phone));
+  async function confirmDeliveryByCourier(id, pin, paymentConfirmed) {
+    const updated = await apiSend(`/api/orders/${id}/confirm-courier`, "POST", { pin, paymentConfirmed }, getPhoneToken(courierInfo.phone));
     setOrders((prev) => prev.map((o) => (o.id === id ? updated : o)));
   }
   async function confirmDeliveryByBuyer(id) {
     const updated = await apiSend(`/api/orders/${id}/confirm-buyer`, "POST", undefined, getPhoneToken(buyerInfo.phone));
     setOrders((prev) => prev.map((o) => (o.id === id ? updated : o)));
+  }
+  // Paiement en ligne des frais de livreur — en plus de l'espèces déjà
+  // possible. L'argent reste bloqué chez le propriétaire jusqu'au code de
+  // confirmation de livraison, qui le libère alors vers le livreur.
+  async function payCourierFeeOnline(order) {
+    const transactionId = `ZK-COURIERFEE-${order.id}-${Date.now()}`;
+    await apiSend("/api/payments/pending", "POST", { transactionId, kind: "courier_fee", orderId: order.id, amount: order.deliveryFee }, getPhoneToken(buyerInfo.phone));
+    return new Promise((resolve, reject) => {
+      launchCinetPaySubscription({
+        transactionId,
+        amount: order.deliveryFee,
+        description: `Frais de livraison — commande #${order.id.slice(-6)}`,
+        customer: { name: buyerInfo.name, phone: buyerInfo.phone },
+        onSuccess: () => resolve(),
+        onError: (msg) => reject(new Error(msg)),
+      });
+    });
   }
   async function disputeOrder(orderId, phone, description, photoUrl) {
     const updated = await apiSend(`/api/orders/${orderId}/dispute`, "POST", { phone, description, photoUrl }, getPhoneToken(phone));
@@ -4387,6 +4959,7 @@ function App() {
               proposeTransport={proposeTransport} confirmTransport={confirmTransport}
               tip={siteContent.tipBuyer}
               announcementMessage={siteContent.announcementMessage} announcementProductId={siteContent.announcementProductId} announcementCreatedAt={siteContent.announcementCreatedAt} announcementVideoUrl={siteContent.announcementVideoUrl}
+              payCourierFeeOnline={payCourierFeeOnline}
             />
           )}
           {role === "vendor" && (
@@ -4405,6 +4978,9 @@ function App() {
               trialDays={trialDays} accessFee={accessFee} onPhoneChanged={(profile) => applyChangedPhone("courier", profile)}
               tip={siteContent.tipCourier}
             />
+          )}
+          {role === "agent" && (
+            <AgentView agentInfo={agentInfo} setAgentInfo={setAgentInfo} logoutAgent={logoutAgent} />
           )}
           {role === "owner" && (
             <OwnerView orders={orders} feeRate={feeRate} updateFeeRate={updateFeeRate} accessFee={accessFee} trialDays={trialDays} updateAccessSettings={updateAccessSettings} ownerPayoutInfo={ownerPayoutInfo} updateOwnerPayoutInfo={updateOwnerPayoutInfo} ownerToken={ownerToken} setOwnerToken={setOwnerToken} siteContent={siteContent} updateContent={updateContent} publishAnnouncement={publishAnnouncement} products={products} />
