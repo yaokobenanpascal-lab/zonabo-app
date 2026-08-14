@@ -284,6 +284,8 @@ CREATE TABLE IF NOT EXISTS withdrawal_requests (
   done_at BIGINT,
   vendor_phone TEXT -- NULL = retrait du propriétaire ; rempli = retrait de ce vendeur
 );
+-- Retrait d'un agent de recrutement (commissions de parrainage gagnées).
+ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS agent_phone TEXT;
 
 -- Vidéo de présentation d'un produit/boutique (marketing) — nécessite Cloudinary
 -- configuré côté vendeur (les vidéos ne peuvent pas être stockées en base64
@@ -390,3 +392,70 @@ CREATE INDEX IF NOT EXISTS idx_notif_log_buyer_type ON notification_log(buyer_ph
 -- Accroche publicitaire courte (générée par l'IA en même temps que la
 -- description) — affichée en surimpression animée sur la photo du produit.
 ALTER TABLE products ADD COLUMN IF NOT EXISTS tagline TEXT;
+
+-- ==================== AGENTS DE RECRUTEMENT (PARRAINAGE) ====================
+-- Des agents commerciaux recrutent de nouveaux inscrits (acheteur, vendeur,
+-- livreur) via un code personnel, et gagnent une commission — payée
+-- seulement quand la personne recrutée devient réellement active (première
+-- commande livrée, premier produit publié, première livraison confirmée),
+-- pas à la simple inscription, pour limiter les faux comptes.
+CREATE TABLE IF NOT EXISTS referral_agents (
+  phone TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  code TEXT UNIQUE NOT NULL,
+  rate_buyer NUMERIC NOT NULL DEFAULT 0,
+  rate_vendor NUMERIC NOT NULL DEFAULT 0,
+  rate_courier NUMERIC NOT NULL DEFAULT 0,
+  active BOOLEAN NOT NULL DEFAULT true,
+  created_at BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS referral_signups (
+  id TEXT PRIMARY KEY,
+  agent_phone TEXT NOT NULL,
+  new_user_phone TEXT NOT NULL,
+  role TEXT NOT NULL, -- buyer | vendor | courier
+  activated BOOLEAN NOT NULL DEFAULT false,
+  activated_at BIGINT,
+  created_at BIGINT NOT NULL,
+  UNIQUE (new_user_phone, role) -- une seule personne = un seul agent crédité, par rôle
+);
+CREATE INDEX IF NOT EXISTS idx_referral_signups_agent ON referral_signups(agent_phone);
+
+-- ==================== SÉCURITÉ : JOURNAL D'ÉVÉNEMENTS SUSPECTS ====================
+-- Trace les tentatives de connexion échouées et autres signaux suspects, pour
+-- que le propriétaire puisse détecter une attaque en cours, pas juste la bloquer
+-- silencieusement.
+CREATE TABLE IF NOT EXISTS security_events (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL, -- failed_owner_login | owner_login_blocked | failed_password_login | password_login_blocked
+  detail TEXT,
+  ip TEXT,
+  created_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_security_events_created ON security_events(created_at DESC);
+
+-- Suivi des photos générées par IA (mannequin/présentation) parmi les photos
+-- d'un produit — sert à afficher un badge "Photo stylisée" côté acheteur, et
+-- à empêcher qu'un produit n'ait QUE des photos générées (au moins une vraie
+-- photo doit toujours rester).
+ALTER TABLE products ADD COLUMN IF NOT EXISTS ai_photo_urls JSONB DEFAULT '[]';
+
+-- Code de confirmation de livraison (4 chiffres) — connu seulement de
+-- l'acheteur, exigé du livreur pour valider la remise. Empêche un livreur de
+-- prétendre avoir livré sans l'avoir fait, et protège contre l'interception
+-- du colis par une autre personne que l'acheteur.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_pin TEXT;
+
+-- Paiement en ligne des frais de livreur (en plus de l'espèces déjà
+-- possible) — l'argent reste bloqué chez le propriétaire jusqu'à la
+-- confirmation de livraison (même code à 4 chiffres), puis rejoint le
+-- portefeuille du livreur automatiquement.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS courier_fee_payment_method TEXT DEFAULT 'cash'; -- 'cash' | 'cinetpay'
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS courier_fee_paid BOOLEAN NOT NULL DEFAULT false;
+-- Confirmation écrite du livreur qu'il a bien reçu son paiement (espèces ou
+-- en ligne) — donnée au même moment que le code de livraison.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS courier_payment_confirmed BOOLEAN NOT NULL DEFAULT false;
+-- Retrait d'un livreur (frais de livraison payés en ligne) — même principe
+-- que pour les vendeurs et les agents.
+ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS courier_phone TEXT;
