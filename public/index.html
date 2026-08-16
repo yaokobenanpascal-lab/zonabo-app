@@ -1975,7 +1975,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
               const cat = CATEGORIES.find((c) => c.name === p.category);
               return (
                 <div key={p.id} className="ticket bg-white border-2 border-[#14213D]/10 overflow-hidden flex flex-col">
-                  <div className="h-28 flex items-center justify-center text-4xl bg-[#FBF7F0] overflow-hidden relative cursor-pointer" onClick={() => (p.imageUrl || p.videoUrl) && setGalleryProduct(p)}>
+                  <div className="aspect-[3/4] flex items-center justify-center text-4xl bg-[#FBF7F0] overflow-hidden relative cursor-pointer" onClick={() => (p.imageUrl || p.videoUrl) && setGalleryProduct(p)}>
                     {p.videoUrl ? (
                       <video src={p.videoUrl} autoPlay muted loop playsInline className="w-full h-full object-cover" />
                     ) : p.imageUrl ? (
