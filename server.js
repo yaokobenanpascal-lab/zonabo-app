@@ -601,6 +601,7 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
       "Cuisine / Ustensiles": `This exact kitchen item staged neatly on a clean light-toned countertop, slight overhead-angled product shot, ${STUDIO_BASE}`,
       "Beauté / Cosmétique": `This exact beauty or cosmetic product displayed upright on a minimal elegant vanity-style pedestal, ${STUDIO_BASE}`,
       "Jouet / Enfant": `This exact toy or children's item displayed upright on a clean minimal surface, playful but tidy product photography style, ${STUDIO_BASE}`,
+      "Véhicule / Engin": `This exact vehicle or machine (car, motorcycle, bicycle, or similar) displayed in a professional automotive showroom setting, clean reflective floor, dramatic professional dealership-style lighting, three-quarter angle that highlights its shape and condition, no people, no mannequin. CRITICAL: this must be the EXACT same vehicle as in the reference photo — do not alter, reinterpret, or invent its color, model, shape, condition or details in any way. Only change the setting/lighting/framing around it, never the vehicle itself.`,
     };
     const promptText = PROMPTS[displayType] || PROMPTS["Vêtement femme"];
     const createResp = await fetch("https://api.dev.runwayml.com/v1/text_to_image", {
