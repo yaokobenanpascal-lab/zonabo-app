@@ -563,7 +563,7 @@ function VendorTrustBadge({ phone }) {
 const VEHICLE_LABELS = { moto: "🏍️ Moto", velo: "🚲 Vélo", voiture: "🚗 Voiture", tricycle: "🛺 Tricycle", pied: "🚶 À pied" };
 // Galerie photo d'un produit — s'ouvre en plein écran, navigation par flèches
 // ou par points, pour montrer plusieurs angles d'un même article.
-function ProductGalleryModal({ product, onClose, buyerPhone }) {
+function ProductGalleryModal({ product, onClose, buyerPhone, addToCart }) {
   const [index, setIndex] = useState(0);
   const [buyerPhotos, setBuyerPhotos] = useState([]);
   const photos = product.imageUrls && product.imageUrls.length ? product.imageUrls : (product.imageUrl ? [product.imageUrl] : []);
@@ -617,6 +617,101 @@ function ProductGalleryModal({ product, onClose, buyerPhone }) {
         </div>
       )}
       <p className="f-body text-xs text-white/70 mt-2">{product.name}</p>
+      {product.negotiable && buyerPhone && (
+        <div onClick={(e) => e.stopPropagation()} className="mt-2 w-full max-w-lg">
+          <PriceNegotiationWidget product={product} buyerPhone={buyerPhone} addToCart={addToCart} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Widget de négociation de prix — affiché dans la galerie du produit si le
+// vendeur a activé la négociation. Gère les trois états : pas encore de
+// négociation, en attente de réponse, ou accord trouvé (valable 24h).
+function PriceNegotiationWidget({ product, buyerPhone, addToCart }) {
+  const [neg, setNeg] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [priceDraft, setPriceDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function load() {
+    try {
+      const list = await apiSend(`/api/negotiations/buyer/${encodeURIComponent(buyerPhone)}`, "GET", undefined, getPhoneToken(buyerPhone));
+      setNeg(list.find((n) => n.productId === product.id) || null);
+    } catch { /* silencieux */ }
+    setLoading(false);
+  }
+  useEffect(() => { load(); }, [product.id, buyerPhone]);
+
+  async function propose() {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await apiSend("/api/negotiations", "POST", { productId: product.id, buyerPhone, proposedPrice: Number(priceDraft) }, getPhoneToken(buyerPhone));
+      setNeg(result);
+      setPriceDraft("");
+    } catch (e) {
+      setError(e.message || "Erreur.");
+    }
+    setBusy(false);
+  }
+  async function respond(action, counterPrice) {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await apiSend(`/api/negotiations/${neg.id}/respond`, "POST", { phone: buyerPhone, action, counterPrice }, getPhoneToken(buyerPhone));
+      setNeg(result);
+      setPriceDraft("");
+    } catch (e) {
+      setError(e.message || "Erreur.");
+    }
+    setBusy(false);
+  }
+
+  if (loading) return null;
+
+  // Accord valable en ce moment — l'acheteur peut commander à ce prix.
+  if (neg && neg.status === "accepted") {
+    const minsLeft = Math.max(0, Math.ceil((neg.expiresAt - Date.now()) / 60000));
+    return (
+      <div className="bg-[#2D6A4F]/15 border-2 border-[#2D6A4F]/40 rounded-xl px-3 py-2 mt-2 text-center">
+        <p className="f-body text-xs text-white">✓ Prix accepté : <strong>{neg.acceptedPrice.toLocaleString("fr-FR")} F</strong> (au lieu de {neg.originalPrice.toLocaleString("fr-FR")} F)</p>
+        <p className="f-mono text-[10px] text-white/60">Valable encore {minsLeft} min — ajoute au panier maintenant pour en profiter.</p>
+        <button onClick={() => addToCart(product, neg.acceptedPrice)} className="w-full f-mono text-xs bg-[#F2A93B] text-[#14213D] py-1.5 rounded-full mt-1.5">Ajouter au panier à {neg.acceptedPrice.toLocaleString("fr-FR")} F</button>
+      </div>
+    );
+  }
+  // En attente de la réponse du vendeur.
+  if (neg && neg.status === "open" && neg.proposedBy === "buyer") {
+    return (
+      <div className="bg-white/10 rounded-xl px-3 py-2 mt-2 text-center">
+        <p className="f-body text-xs text-white">Ta proposition : {neg.proposedPrice.toLocaleString("fr-FR")} F — en attente de la réponse du vendeur.</p>
+      </div>
+    );
+  }
+  // Le vendeur a contre-proposé — l'acheteur peut accepter, refuser, ou re-proposer.
+  if (neg && neg.status === "open" && neg.proposedBy === "vendor") {
+    return (
+      <div className="bg-[#F2A93B]/15 border-2 border-[#F2A93B]/40 rounded-xl px-3 py-2 mt-2">
+        <p className="f-body text-xs text-white mb-1.5">Le vendeur propose : <strong>{neg.proposedPrice.toLocaleString("fr-FR")} F</strong></p>
+        <div className="flex gap-1.5">
+          <button disabled={busy} onClick={() => respond("accept")} className="flex-1 f-mono text-[10px] bg-[#2D6A4F] text-white py-1.5 rounded-full">Accepter</button>
+          <button disabled={busy} onClick={() => respond("reject")} className="flex-1 f-mono text-[10px] bg-white/20 text-white py-1.5 rounded-full">Refuser</button>
+        </div>
+        {error && <p className="f-body text-[9px] text-red-300 mt-1">{error}</p>}
+      </div>
+    );
+  }
+  // Pas de négociation active (ou refusée/expirée) — l'acheteur peut en proposer une nouvelle.
+  return (
+    <div className="bg-white/10 rounded-xl px-3 py-2 mt-2">
+      <div className="flex gap-1.5">
+        <input type="number" placeholder={`Ton prix (< ${product.price.toLocaleString("fr-FR")} F)`} value={priceDraft} onChange={(e) => setPriceDraft(e.target.value)} className="f-body flex-1 px-2 py-1.5 rounded-lg text-xs" />
+        <button disabled={busy || !priceDraft} onClick={propose} className="f-mono text-[10px] bg-[#F2A93B] text-[#14213D] disabled:opacity-40 px-3 py-1.5 rounded-full whitespace-nowrap">💬 Proposer</button>
+      </div>
+      {error && <p className="f-body text-[9px] text-red-300 mt-1">{error}</p>}
     </div>
   );
 }
@@ -1799,11 +1894,12 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
     );
   }
 
-  function addToCart(p) {
+  function addToCart(p, negotiatedPrice) {
+    const price = negotiatedPrice || p.price;
     setCart((c) => {
       const existing = c.find((i) => i.id === p.id);
-      if (existing) return c.map((i) => (i.id === p.id ? { ...i, qty: i.qty + 1 } : i));
-      return [...c, { id: p.id, name: p.name, price: p.price, qty: 1, vendorName: p.vendorName, vendorPhone: p.vendorPhone, zone: p.zone, deliveryTime: p.deliveryTime, vendorLandmark: p.vendorLandmark || "" }];
+      if (existing) return c.map((i) => (i.id === p.id ? { ...i, qty: i.qty + 1, price } : i));
+      return [...c, { id: p.id, name: p.name, price, qty: 1, vendorName: p.vendorName, vendorPhone: p.vendorPhone, zone: p.zone, deliveryTime: p.deliveryTime, vendorLandmark: p.vendorLandmark || "" }];
     });
   }
   function changeQty(id, delta) {
@@ -1991,6 +2087,9 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                     )}
                     {!p.videoUrl && p.imageUrl && (p.aiPhotoUrls || []).includes(p.imageUrl) && (
                       <span className="absolute bottom-1.5 left-1.5 f-mono text-[9px] bg-[#946B00]/90 text-white px-1.5 py-0.5 rounded-full">📸 Présentation</span>
+                    )}
+                    {p.negotiable && (
+                      <span className="absolute top-1.5 left-1.5 f-mono text-[9px] bg-[#14213D]/80 text-white px-1.5 py-0.5 rounded-full">💬 Négociable</span>
                     )}
                     {buyerInfo.phone && (
                       <button
@@ -2360,7 +2459,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
           </div>
         </div>
       )}
-      {galleryProduct && <ProductGalleryModal product={galleryProduct} onClose={() => setGalleryProduct(null)} buyerPhone={buyerInfo.phone} />}
+      {galleryProduct && <ProductGalleryModal product={galleryProduct} onClose={() => setGalleryProduct(null)} buyerPhone={buyerInfo.phone} addToCart={addToCart} />}
       {receiptOrder && <ReceiptModal order={receiptOrder} onClose={() => setReceiptOrder(null)} />}
     </div>
   );
@@ -2368,7 +2467,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
 
 function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addProduct, updateProduct, deleteProduct, orders, confirmOrder, cancelOrder, shipOrder, updateStatus, setRole, trialDays, accessFee, onPhoneChanged, proposeTransport, confirmTransport, tip }) {
   const [shipForm, setShipForm] = useState({}); // { [orderId]: { company, tracking } }
-  const [form, setForm] = useState({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrls: [], videoUrls: [], deliveryTime: "", description: "", tagline: "", aiPhotoUrls: [], vendorLandmark: vendorInfo.landmark || "" });
+  const [form, setForm] = useState({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrls: [], videoUrls: [], deliveryTime: "", description: "", tagline: "", aiPhotoUrls: [], negotiable: false, vendorLandmark: vendorInfo.landmark || "" });
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [editingProfile, setEditingProfile] = useState(false);
@@ -2378,7 +2477,34 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
   const [generatingDesc, setGeneratingDesc] = useState(false);
   const [descKeywords, setDescKeywords] = useState("");
   const [generatingMannequin, setGeneratingMannequin] = useState(false);
+  const [vendorNegotiations, setVendorNegotiations] = useState([]);
+  const [negCounterDraft, setNegCounterDraft] = useState({});
+  const [negBusy, setNegBusy] = useState(null);
+
+  async function loadVendorNegotiations() {
+    try {
+      const list = await apiSend(`/api/negotiations/vendor/${encodeURIComponent(vendorInfo.phone)}`, "GET", undefined, getPhoneToken(vendorInfo.phone));
+      setVendorNegotiations(list);
+    } catch (e) {
+      console.error("Erreur de chargement des négociations:", e);
+    }
+  }
+  useEffect(() => { if (vendorInfo.phone) loadVendorNegotiations(); }, [vendorInfo.phone]);
+
+  async function respondNegotiation(id, action, counterPrice) {
+    setNegBusy(id);
+    try {
+      await apiSend(`/api/negotiations/${id}/respond`, "POST", { phone: vendorInfo.phone, action, counterPrice }, getPhoneToken(vendorInfo.phone));
+      loadVendorNegotiations();
+    } catch (e) {
+      alert(e.message || "Erreur pendant la réponse à la négociation.");
+    }
+    setNegBusy(null);
+  }
   const [displayType, setDisplayType] = useState("Vêtement femme");
+  const [backgroundStyle, setBackgroundStyle] = useState("Studio blanc épuré");
+  const [generatingBackground, setGeneratingBackground] = useState(false);
+  const [backgroundError, setBackgroundError] = useState("");
   const [mannequinPose, setMannequinPose] = useState("Trois-quarts");
   const [mannequinError, setMannequinError] = useState("");
   const [certifiedAccurate, setCertifiedAccurate] = useState(false);
@@ -2464,10 +2590,10 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
 
   function startEdit(p) {
     setEditingId(p.id);
-    setEditForm({ price: p.price, stock: p.stock, deliveryTime: p.deliveryTime || "", imageUrls: p.imageUrls || (p.imageUrl ? [p.imageUrl] : []), videoUrls: p.videoUrls || (p.videoUrl ? [p.videoUrl] : []), description: p.description || "", tagline: p.tagline || "", aiPhotoUrls: p.aiPhotoUrls || [], vendorLandmark: p.vendorLandmark || "" });
+    setEditForm({ price: p.price, stock: p.stock, deliveryTime: p.deliveryTime || "", imageUrls: p.imageUrls || (p.imageUrl ? [p.imageUrl] : []), videoUrls: p.videoUrls || (p.videoUrl ? [p.videoUrl] : []), description: p.description || "", tagline: p.tagline || "", aiPhotoUrls: p.aiPhotoUrls || [], negotiable: p.negotiable || false, vendorLandmark: p.vendorLandmark || "" });
   }
   function saveEdit(id) {
-    updateProduct(id, { price: Number(editForm.price), stock: Number(editForm.stock), deliveryTime: editForm.deliveryTime || "Non précisé", imageUrls: editForm.imageUrls || [], videoUrls: editForm.videoUrls || [], description: editForm.description || "", tagline: editForm.tagline || "", aiPhotoUrls: editForm.aiPhotoUrls || [], vendorLandmark: editForm.vendorLandmark || "" });
+    updateProduct(id, { price: Number(editForm.price), stock: Number(editForm.stock), deliveryTime: editForm.deliveryTime || "Non précisé", imageUrls: editForm.imageUrls || [], videoUrls: editForm.videoUrls || [], description: editForm.description || "", tagline: editForm.tagline || "", aiPhotoUrls: editForm.aiPhotoUrls || [], negotiable: editForm.negotiable, vendorLandmark: editForm.vendorLandmark || "" });
     setEditingId(null);
   }
   async function handleImageUpload(file, target) {
@@ -2542,6 +2668,18 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
       setMannequinError(e.message || "Impossible de générer la photo mannequin pour l'instant.");
     }
     setGeneratingMannequin(false);
+  }
+  async function changeBackground() {
+    if (!form.imageUrls[0]) { setBackgroundError("Ajoute d'abord au moins une photo de l'article."); return; }
+    setGeneratingBackground(true);
+    setBackgroundError("");
+    try {
+      const { imageUrl } = await apiSend("/api/products/change-background", "POST", { vendorPhone: vendorInfo.phone, imageUrl: form.imageUrls[0], backgroundStyle }, getPhoneToken(vendorInfo.phone));
+      if (form.imageUrls.length < 5) setForm((f) => ({ ...f, imageUrls: [imageUrl, ...f.imageUrls], aiPhotoUrls: [...f.aiPhotoUrls, imageUrl] }));
+    } catch (e) {
+      setBackgroundError(e.message || "Impossible de changer le fond pour l'instant.");
+    }
+    setGeneratingBackground(false);
   }
   async function handleVideoUpload(file, target) {
     if (!file) return;
@@ -2763,6 +2901,33 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
         </div>
       )}
 
+      {vendorNegotiations.filter((n) => n.status === "open" && n.proposedBy === "buyer").length > 0 && (
+        <div className="ticket bg-white border-2 border-[#F2A93B]/40 p-4 mb-6">
+          <p className="f-mono text-[11px] uppercase tracking-wide text-[#946B00] mb-2">💬 Négociations en attente</p>
+          <div className="space-y-2">
+            {vendorNegotiations.filter((n) => n.status === "open" && n.proposedBy === "buyer").map((n) => (
+              <div key={n.id} className="bg-[#F2A93B]/10 rounded-lg p-2.5">
+                <p className="f-body text-xs text-[#14213D]">
+                  <strong>{n.productName}</strong> — propose <strong>{n.proposedPrice.toLocaleString("fr-FR")} F</strong> (prix affiché : {n.originalPrice.toLocaleString("fr-FR")} F)
+                </p>
+                <div className="flex gap-1.5 mt-1.5">
+                  <button disabled={negBusy === n.id} onClick={() => respondNegotiation(n.id, "accept")} className="f-mono text-[10px] bg-[#2D6A4F] text-white px-2.5 py-1 rounded-full">Accepter</button>
+                  <button disabled={negBusy === n.id} onClick={() => respondNegotiation(n.id, "reject")} className="f-mono text-[10px] bg-[#14213D]/10 text-[#14213D] px-2.5 py-1 rounded-full">Refuser</button>
+                  <input
+                    type="number"
+                    placeholder="Contre-offre"
+                    value={negCounterDraft[n.id] || ""}
+                    onChange={(e) => setNegCounterDraft({ ...negCounterDraft, [n.id]: e.target.value })}
+                    className="f-body w-24 px-2 py-1 rounded-lg border-2 border-[#14213D]/15 text-[10px]"
+                  />
+                  <button disabled={negBusy === n.id || !negCounterDraft[n.id]} onClick={() => respondNegotiation(n.id, "counter", Number(negCounterDraft[n.id]))} className="f-mono text-[10px] bg-[#14213D] disabled:opacity-40 text-white px-2.5 py-1 rounded-full">Contre-proposer</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="flex gap-2 mb-6">
         <button onClick={() => setShowStats((s) => !s)} className="flex-1 f-mono text-xs bg-[#14213D]/5 text-[#14213D] py-2 rounded-full">
           {showStats ? "Masquer les statistiques" : "📊 Voir les statistiques"}
@@ -2876,6 +3041,25 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                   )}
                 </div>
               )}
+              {form.imageUrls[0] && form.imageUrls.length < 5 && (
+                <div className="mt-2 bg-[#14213D]/5 rounded-lg p-2.5">
+                  <p className="f-mono text-[10px] uppercase tracking-wide text-[#14213D]/50 mb-1.5">🖼️ Changer le fond (garde l'article intact)</p>
+                  <p className="f-body text-[9px] text-[#14213D]/40 mb-1.5">Idéal si la photo a été prise sur un lit, un sol ou un fond encombré — seul le décor change, jamais l'article.</p>
+                  <select value={backgroundStyle} onChange={(e) => setBackgroundStyle(e.target.value)} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-xs mb-1.5">
+                    <option>Studio blanc épuré</option>
+                    <option>Extérieur naturel</option>
+                    <option>Intérieur chaleureux</option>
+                    <option>Dégradé de couleur</option>
+                  </select>
+                  <button disabled={generatingBackground} onClick={changeBackground} className="w-full f-mono text-xs bg-[#14213D] disabled:opacity-40 text-white py-2 rounded-lg">
+                    {generatingBackground ? "Génération… (≈30-60s)" : "Changer le fond à partir de la 1ère photo"}
+                  </button>
+                  {backgroundError && <p className="f-body text-[10px] text-[#C1440E] mt-1">{backgroundError}</p>}
+                  {form.aiPhotoUrls.length > 0 && (
+                    <p className="f-body text-[10px] text-[#946B00] bg-[#946B00]/10 rounded-lg px-2 py-1.5 mt-1.5">⚠️ Cette image est générée par IA — l'acheteur verra une mention discrète "Photo de présentation" dessus, et au moins une vraie photo doit toujours rester dans ta galerie.</p>
+                  )}
+                </div>
+              )}
             </div>
 
             <div>
@@ -2928,6 +3112,10 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
             <input placeholder="Point de repère pour ce produit (facultatif — sinon celui de ton profil est utilisé)" value={form.vendorLandmark} onChange={(e) => setForm({ ...form, vendorLandmark: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#2D6A4F]" />
             <input placeholder="Délai de préparation (ex: 24h)" value={form.deliveryTime} onChange={(e) => setForm({ ...form, deliveryTime: e.target.value })} className="f-body w-full px-3 py-2 rounded-lg border-2 border-[#14213D]/15 text-sm focus:outline-none focus:border-[#2D6A4F]" />
             <p className="f-body text-[11px] text-[#14213D]/40">Les frais de livraison ne sont plus fixés ici : c'est le livreur qui propose son prix quand il accepte la commande.</p>
+            <label className="flex items-start gap-2 bg-[#14213D]/5 border-2 border-[#14213D]/15 rounded-lg px-3 py-2 cursor-pointer">
+              <input type="checkbox" checked={form.negotiable} onChange={(e) => setForm({ ...form, negotiable: e.target.checked })} className="w-4 h-4 mt-0.5 accent-[#2D6A4F]" />
+              <span className="f-body text-[11px] text-[#14213D]">💬 Accepter la négociation du prix — l'acheteur pourra proposer un prix inférieur, que tu pourras accepter, refuser ou contre-proposer.</span>
+            </label>
             <label className="flex items-start gap-2 bg-[#F2A93B]/10 border-2 border-[#F2A93B]/30 rounded-lg px-3 py-2 cursor-pointer">
               <input type="checkbox" checked={certifiedAccurate} onChange={(e) => setCertifiedAccurate(e.target.checked)} className="w-4 h-4 mt-0.5 accent-[#2D6A4F]" />
               <span className="f-body text-[11px] text-[#14213D]">Je certifie que ces photos/vidéos représentent fidèlement l'article réellement vendu (forme, taille, marque, modèle).</span>
@@ -2940,7 +3128,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                 setPublishError("");
                 try {
                   await addProduct({ ...form, price: Number(form.price), stock: Number(form.stock) || 0, deliveryTime: form.deliveryTime || "Non précisé", vendorName: vendorInfo.name, vendorPhone: vendorInfo.phone });
-                  setForm({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrls: [], videoUrls: [], deliveryTime: "", description: "", tagline: "", aiPhotoUrls: [], vendorLandmark: vendorInfo.landmark || "" });
+                  setForm({ name: "", price: "", category: CATEGORIES[0].name, zone: "", stock: "", imageUrls: [], videoUrls: [], deliveryTime: "", description: "", tagline: "", aiPhotoUrls: [], negotiable: false, vendorLandmark: vendorInfo.landmark || "" });
                   setCertifiedAccurate(false);
                 } catch (e) {
                   setPublishError(e.message || "Impossible de publier le produit. Réessaie.");
@@ -2974,6 +3162,10 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                       <input type="number" placeholder="Stock" value={editForm.stock} onChange={(e) => setEditForm({ ...editForm, stock: e.target.value })} className="f-mono w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
                       <input placeholder="Délai" value={editForm.deliveryTime} onChange={(e) => setEditForm({ ...editForm, deliveryTime: e.target.value })} className="f-mono w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
                       <input placeholder="Point de repère" value={editForm.vendorLandmark} onChange={(e) => setEditForm({ ...editForm, vendorLandmark: e.target.value })} className="f-mono w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
+                      <label className="flex items-center gap-1.5 col-span-2 f-body text-[10px] text-[#14213D] cursor-pointer">
+                        <input type="checkbox" checked={editForm.negotiable} onChange={(e) => setEditForm({ ...editForm, negotiable: e.target.checked })} className="w-3.5 h-3.5 accent-[#2D6A4F]" />
+                        💬 Prix négociable
+                      </label>
                     </div>
                     <textarea placeholder="Détails sur l'article" value={editForm.description} onChange={(e) => setEditForm({ ...editForm, description: e.target.value })} rows={2} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
                     <div>
@@ -4655,7 +4847,15 @@ function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [p, o, s, c] = await Promise.all([apiGet("/api/products"), apiGet("/api/orders"), apiGet("/api/settings"), apiGet("/api/content")]);
+      // Sécurité : on ne demande que les commandes liées aux numéros
+      // réellement vérifiés sur cet appareil (jamais toutes les commandes) —
+      // le propriétaire, lui, passe par son propre jeton pour tout voir.
+      const phoneTokensList = [buyerInfo, vendorInfo, courierInfo]
+        .filter((info) => info.registered && info.phone)
+        .map((info) => getPhoneToken(info.phone))
+        .filter(Boolean);
+      const ordersUrl = phoneTokensList.length ? `/api/orders?phoneTokens=${encodeURIComponent(phoneTokensList.join(","))}` : "/api/orders";
+      const [p, o, s, c] = await Promise.all([apiGet("/api/products"), apiSend(ordersUrl, "GET", undefined, ownerToken || undefined), apiGet("/api/settings"), apiGet("/api/content")]);
       setProducts(p);
       setOrders(o);
       setFeeRate(s.feeRate ?? DEFAULT_FEE_RATE);
@@ -4693,7 +4893,7 @@ function App() {
       console.error("Erreur de rafraîchissement depuis le serveur:", e);
     }
     setLoading(false);
-  }, [role, vendorInfo.phone, courierInfo.phone]);
+  }, [role, vendorInfo.phone, courierInfo.phone, buyerInfo.phone, ownerToken]);
 
   // Au premier chargement, on retrouve le "je suis connecté en tant que..." mémorisé
   // sur cet appareil, puis on va chercher chez le serveur le vrai statut d'abonnement
