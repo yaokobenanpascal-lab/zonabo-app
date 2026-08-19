@@ -590,16 +590,21 @@ app.post("/api/negotiations", requirePhone((req) => req.body.buyerPhone), async 
 });
 
 app.post("/api/negotiations/:id/respond", requirePhone((req) => req.body.phone), async (req, res) => {
-  const { phone, action, counterPrice } = req.body;
+  const { phone, action, counterPrice, role } = req.body;
+  if (!["buyer", "vendor"].includes(role)) return res.status(400).json({ error: "Rôle invalide." });
   const { rows } = await pool.query("SELECT * FROM price_negotiations WHERE id = $1", [req.params.id]);
   const neg = rows[0];
   if (!neg) return res.status(404).json({ error: "Négociation introuvable." });
-  const isBuyer = phone === neg.buyer_phone;
-  const isVendor = phone === neg.vendor_phone;
-  if (!isBuyer && !isVendor) return res.status(403).json({ error: "Cette négociation ne te concerne pas." });
+  // On se base sur le rôle explicitement déclaré (pas seulement sur le
+  // numéro de téléphone) — sinon, si un même numéro sert de test à la fois
+  // pour acheteur et vendeur, impossible de savoir qui répond vraiment.
+  const isBuyer = role === "buyer";
+  const isVendor = role === "vendor";
+  if (isBuyer && phone !== neg.buyer_phone) return res.status(403).json({ error: "Cette négociation ne te concerne pas." });
+  if (isVendor && phone !== neg.vendor_phone) return res.status(403).json({ error: "Cette négociation ne te concerne pas." });
   if (neg.status !== "open") return res.status(400).json({ error: "Cette négociation n'est plus ouverte." });
   // On ne peut pas répondre à sa propre dernière proposition — il faut attendre l'autre partie.
-  if (neg.proposed_by === (isBuyer ? "buyer" : "vendor")) return res.status(400).json({ error: "En attente de la réponse de l'autre partie." });
+  if (neg.proposed_by === role) return res.status(400).json({ error: "En attente de la réponse de l'autre partie." });
   const now = Date.now();
   if (action === "accept") {
     const expiresAt = now + NEGOTIATION_VALID_MS;
@@ -783,7 +788,7 @@ app.post("/api/products/change-background", requirePhone((req) => req.body.vendo
   try {
     const FIDELITY = "CRITICAL: keep the exact same product completely unchanged — same angle, same proportions, same colors, same shadows falling on the product itself, same reflections on it. Do not alter, reinterpret, or invent anything about the product. Only replace what is BEHIND and AROUND it — the backdrop, floor and surrounding environment — never the product itself.";
     const BACKGROUNDS = {
-      "Studio blanc épuré": `Replace the background behind this exact product with a pure white seamless studio backdrop, soft even professional lighting, clean minimal e-commerce product photography look. ${FIDELITY}`,
+      "Studio blanc épuré": `Completely remove and erase everything from the original photo except the product itself — the floor, bed, table, walls, furniture, shadows, reflections and any other surrounding object or clutter must be entirely gone, with zero trace or blending of the original background left behind. Replace all of it with a pure, seamless, uniform white studio backdrop (RGB 255,255,255), soft even professional front lighting, a clean subtle contact shadow directly under the product only, minimal e-commerce product photography look, sharp clean edges around the product with no leftover fragments of the old scene. ${FIDELITY}`,
       "Extérieur naturel": `Replace the background behind this exact product with a softly blurred natural outdoor setting (warm daylight, greenery or open sky, shallow depth of field), lifestyle product photography look. ${FIDELITY}`,
       "Intérieur chaleureux": `Replace the background behind this exact product with a softly blurred warm home interior setting (wooden surface, soft natural window light), cozy lifestyle product photography look. ${FIDELITY}`,
       "Dégradé de couleur": `Replace the background behind this exact product with a smooth elegant navy-to-gold gradient studio backdrop, soft professional lighting, premium e-commerce product photography look. ${FIDELITY}`,
