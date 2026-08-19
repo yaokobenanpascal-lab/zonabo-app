@@ -661,7 +661,7 @@ function PriceNegotiationWidget({ product, buyerPhone, addToCart }) {
     setBusy(true);
     setError("");
     try {
-      const result = await apiSend(`/api/negotiations/${neg.id}/respond`, "POST", { phone: buyerPhone, action, counterPrice }, getPhoneToken(buyerPhone));
+      const result = await apiSend(`/api/negotiations/${neg.id}/respond`, "POST", { phone: buyerPhone, action, counterPrice, role: "buyer" }, getPhoneToken(buyerPhone));
       setNeg(result);
       setPriceDraft("");
     } catch (e) {
@@ -2494,7 +2494,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
   async function respondNegotiation(id, action, counterPrice) {
     setNegBusy(id);
     try {
-      await apiSend(`/api/negotiations/${id}/respond`, "POST", { phone: vendorInfo.phone, action, counterPrice }, getPhoneToken(vendorInfo.phone));
+      await apiSend(`/api/negotiations/${id}/respond`, "POST", { phone: vendorInfo.phone, action, counterPrice, role: "vendor" }, getPhoneToken(vendorInfo.phone));
       loadVendorNegotiations();
     } catch (e) {
       alert(e.message || "Erreur pendant la réponse à la négociation.");
