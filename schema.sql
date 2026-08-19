@@ -459,3 +459,27 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS courier_payment_confirmed BOOLEAN NO
 -- Retrait d'un livreur (frais de livraison payés en ligne) — même principe
 -- que pour les vendeurs et les agents.
 ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS courier_phone TEXT;
+
+-- ==================== NÉGOCIATION DE PRIX ====================
+-- Le vendeur choisit produit par produit s'il accepte la négociation — comme
+-- dans un vrai marché, tout ne se discute pas.
+ALTER TABLE products ADD COLUMN IF NOT EXISTS negotiable BOOLEAN NOT NULL DEFAULT false;
+
+CREATE TABLE IF NOT EXISTS price_negotiations (
+  id TEXT PRIMARY KEY,
+  product_id TEXT NOT NULL,
+  buyer_phone TEXT NOT NULL,
+  vendor_phone TEXT NOT NULL,
+  original_price NUMERIC NOT NULL,
+  proposed_price NUMERIC NOT NULL,
+  proposed_by TEXT NOT NULL, -- 'buyer' | 'vendor'
+  status TEXT NOT NULL DEFAULT 'open', -- open | accepted | rejected | expired
+  accepted_price NUMERIC,
+  accepted_at BIGINT,
+  expires_at BIGINT, -- accepted_at + 24h — passé ce délai, le prix négocié n'est plus valable
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  UNIQUE (product_id, buyer_phone)
+);
+CREATE INDEX IF NOT EXISTS idx_negotiations_vendor ON price_negotiations(vendor_phone, status);
+CREATE INDEX IF NOT EXISTS idx_negotiations_buyer ON price_negotiations(buyer_phone, status);
