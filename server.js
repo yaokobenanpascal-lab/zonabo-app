@@ -286,6 +286,37 @@ async function getTokenPhone(req) {
     return null;
   }
 }
+// Résout plusieurs jetons téléphone à la fois (un appareil peut avoir été
+// utilisé pour plusieurs rôles — acheteur, vendeur, livreur — chacun avec son
+// propre jeton) — utilisé pour ne renvoyer QUE les commandes concernant les
+// numéros réellement vérifiés sur cet appareil, jamais toutes les commandes.
+async function resolveTokensToPhones(tokensParam) {
+  if (!tokensParam) return [];
+  const tokens = [...new Set(tokensParam.split(",").map((t) => t.trim()).filter(Boolean))].slice(0, 10);
+  if (tokens.length === 0) return [];
+  try {
+    const { rows } = await pool.query(
+      "SELECT DISTINCT phone FROM phone_tokens WHERE token = ANY($1) AND expires_at > $2",
+      [tokens, Date.now()]
+    );
+    return rows.map((r) => r.phone);
+  } catch (e) {
+    console.error("Erreur de résolution des jetons téléphone:", e);
+    return [];
+  }
+}
+async function isValidOwnerToken(req) {
+  const auth = req.headers.authorization || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (!token) return false;
+  try {
+    const { rows } = await pool.query("SELECT expires_at FROM owner_tokens WHERE token = $1", [token]);
+    return !!(rows[0] && Number(rows[0].expires_at) >= Date.now());
+  } catch (e) {
+    console.error("Erreur de vérification du jeton propriétaire:", e);
+    return false;
+  }
+}
 // À utiliser sur toute route où quelqu'un agit "en tant que" tel numéro de téléphone
 // (créer une commande, proposer un prix, confirmer une réception...). Compare le
 // téléphone du jeton envoyé à celui que la requête prétend utiliser.
@@ -314,6 +345,7 @@ function mapProduct(r) {
     videoUrls: r.video_urls && r.video_urls.length ? r.video_urls : (r.video_url ? [r.video_url] : []),
     tagline: r.tagline || "",
     aiPhotoUrls: r.ai_photo_urls || [],
+    negotiable: r.negotiable || false,
   };
 }
 function mapOrder(r) {
@@ -365,6 +397,18 @@ function mapReport(r) {
   return {
     id: r.id, orderId: r.order_id, vendorPhone: r.vendor_phone, buyerPhone: r.buyer_phone,
     reason: r.reason, details: r.details, status: r.status, createdAt: Number(r.created_at),
+  };
+}
+function mapNegotiation(r) {
+  const isValid = r.status === "accepted" && r.expires_at && Number(r.expires_at) > Date.now();
+  return {
+    id: r.id, productId: r.product_id, buyerPhone: r.buyer_phone, vendorPhone: r.vendor_phone,
+    originalPrice: Number(r.original_price), proposedPrice: Number(r.proposed_price), proposedBy: r.proposed_by,
+    status: isValid ? "accepted" : (r.status === "accepted" ? "expired" : r.status),
+    acceptedPrice: r.accepted_price !== null ? Number(r.accepted_price) : null,
+    acceptedAt: r.accepted_at ? Number(r.accepted_at) : null,
+    expiresAt: r.expires_at ? Number(r.expires_at) : null,
+    createdAt: Number(r.created_at), updatedAt: Number(r.updated_at),
   };
 }
 function mapSettings(r) {
@@ -517,6 +561,87 @@ app.get("/api/products", async (req, res) => {
 // Aide à la rédaction : le vendeur donne juste le nom + quelques mots-clés,
 // l'IA rédige une description attirante. Le vendeur reste libre de la
 // modifier ou de l'ignorer avant de publier.
+// ==================== NÉGOCIATION DE PRIX ====================
+// L'acheteur propose un prix, le vendeur accepte/refuse/contre-propose — un
+// peu comme discuter le prix en personne chez un vendeur. Une fois accepté,
+// le prix négocié n'est valable que 24h.
+const NEGOTIATION_VALID_MS = 24 * 60 * 60 * 1000;
+
+app.post("/api/negotiations", requirePhone((req) => req.body.buyerPhone), async (req, res) => {
+  const { productId, buyerPhone, proposedPrice, message } = req.body;
+  if (!productId || !proposedPrice || Number(proposedPrice) <= 0) return res.status(400).json({ error: "Indique un prix valide." });
+  const { rows: prodRows } = await pool.query("SELECT price, vendor_phone, negotiable, name FROM products WHERE id = $1", [productId]);
+  const product = prodRows[0];
+  if (!product) return res.status(404).json({ error: "Produit introuvable." });
+  if (!product.negotiable) return res.status(400).json({ error: "Ce produit n'est pas négociable." });
+  if (Number(proposedPrice) >= Number(product.price)) return res.status(400).json({ error: "Propose un prix inférieur au prix affiché." });
+  const now = Date.now();
+  await pool.query(
+    `INSERT INTO price_negotiations (id, product_id, buyer_phone, vendor_phone, original_price, proposed_price, proposed_by, status, created_at, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,'buyer','open',$7,$7)
+     ON CONFLICT (product_id, buyer_phone) DO UPDATE SET
+       proposed_price = $6, proposed_by = 'buyer', status = 'open', updated_at = $7,
+       accepted_price = NULL, accepted_at = NULL, expires_at = NULL`,
+    [uid(), productId, buyerPhone, product.vendor_phone, product.price, proposedPrice, now]
+  );
+  logAdminAction("Négociation de prix ouverte", product.vendor_phone, `${product.name} — proposé ${proposedPrice} F`);
+  const { rows } = await pool.query("SELECT * FROM price_negotiations WHERE product_id = $1 AND buyer_phone = $2", [productId, buyerPhone]);
+  res.json(mapNegotiation(rows[0]));
+});
+
+app.post("/api/negotiations/:id/respond", requirePhone((req) => req.body.phone), async (req, res) => {
+  const { phone, action, counterPrice } = req.body;
+  const { rows } = await pool.query("SELECT * FROM price_negotiations WHERE id = $1", [req.params.id]);
+  const neg = rows[0];
+  if (!neg) return res.status(404).json({ error: "Négociation introuvable." });
+  const isBuyer = phone === neg.buyer_phone;
+  const isVendor = phone === neg.vendor_phone;
+  if (!isBuyer && !isVendor) return res.status(403).json({ error: "Cette négociation ne te concerne pas." });
+  if (neg.status !== "open") return res.status(400).json({ error: "Cette négociation n'est plus ouverte." });
+  // On ne peut pas répondre à sa propre dernière proposition — il faut attendre l'autre partie.
+  if (neg.proposed_by === (isBuyer ? "buyer" : "vendor")) return res.status(400).json({ error: "En attente de la réponse de l'autre partie." });
+  const now = Date.now();
+  if (action === "accept") {
+    const expiresAt = now + NEGOTIATION_VALID_MS;
+    await pool.query(
+      "UPDATE price_negotiations SET status = 'accepted', accepted_price = proposed_price, accepted_at = $1, expires_at = $2, updated_at = $1 WHERE id = $3",
+      [now, expiresAt, req.params.id]
+    );
+  } else if (action === "reject") {
+    await pool.query("UPDATE price_negotiations SET status = 'rejected', updated_at = $1 WHERE id = $2", [now, req.params.id]);
+  } else if (action === "counter") {
+    if (!counterPrice || Number(counterPrice) <= 0) return res.status(400).json({ error: "Indique un prix valide." });
+    if (isVendor && Number(counterPrice) >= Number(neg.original_price)) return res.status(400).json({ error: "La contre-proposition doit rester sous le prix affiché." });
+    await pool.query(
+      "UPDATE price_negotiations SET proposed_price = $1, proposed_by = $2, updated_at = $3 WHERE id = $4",
+      [counterPrice, isBuyer ? "buyer" : "vendor", now, req.params.id]
+    );
+  } else {
+    return res.status(400).json({ error: "Action invalide." });
+  }
+  const { rows: r2 } = await pool.query("SELECT * FROM price_negotiations WHERE id = $1", [req.params.id]);
+  res.json(mapNegotiation(r2[0]));
+});
+
+app.get("/api/negotiations/buyer/:phone", requirePhone((req) => req.params.phone), async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT n.*, p.name AS product_name, p.image_url AS product_image
+     FROM price_negotiations n JOIN products p ON p.id = n.product_id
+     WHERE n.buyer_phone = $1 ORDER BY n.updated_at DESC`,
+    [req.params.phone]
+  );
+  res.json(rows.map((r) => ({ ...mapNegotiation(r), productName: r.product_name, productImage: r.product_image })));
+});
+app.get("/api/negotiations/vendor/:phone", requirePhone((req) => req.params.phone), async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT n.*, p.name AS product_name, p.image_url AS product_image
+     FROM price_negotiations n JOIN products p ON p.id = n.product_id
+     WHERE n.vendor_phone = $1 ORDER BY n.updated_at DESC`,
+    [req.params.phone]
+  );
+  res.json(rows.map((r) => ({ ...mapNegotiation(r), productName: r.product_name, productImage: r.product_image })));
+});
+
 app.post("/api/products/generate-description", requirePhone((req) => req.body.vendorPhone), async (req, res) => {
   if (!ANTHROPIC_API_KEY) return res.status(500).json({ error: "L'aide à la rédaction IA n'est pas encore configurée sur le serveur." });
   const { name, category, keywords } = req.body;
@@ -647,6 +772,63 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
   }
 });
 
+// Change uniquement le décor derrière l'article (jamais l'article lui-même)
+// — plus sûr que la photo mannequin puisque ça ne touche pas au produit,
+// juste ce qu'il y a autour. Utile pour une photo prise sur un lit, un sol
+// ou un fond encombré, à rendre professionnelle sans rien changer à l'article.
+app.post("/api/products/change-background", requirePhone((req) => req.body.vendorPhone), async (req, res) => {
+  if (!RUNWAY_API_KEY) return res.status(500).json({ error: "Le changement de fond n'est pas encore configuré sur le serveur." });
+  const { imageUrl, backgroundStyle } = req.body;
+  if (!imageUrl) return res.status(400).json({ error: "Choisis d'abord une photo de l'article." });
+  try {
+    const FIDELITY = "CRITICAL: keep the exact same product completely unchanged — same angle, same proportions, same colors, same shadows falling on the product itself, same reflections on it. Do not alter, reinterpret, or invent anything about the product. Only replace what is BEHIND and AROUND it — the backdrop, floor and surrounding environment — never the product itself.";
+    const BACKGROUNDS = {
+      "Studio blanc épuré": `Replace the background behind this exact product with a pure white seamless studio backdrop, soft even professional lighting, clean minimal e-commerce product photography look. ${FIDELITY}`,
+      "Extérieur naturel": `Replace the background behind this exact product with a softly blurred natural outdoor setting (warm daylight, greenery or open sky, shallow depth of field), lifestyle product photography look. ${FIDELITY}`,
+      "Intérieur chaleureux": `Replace the background behind this exact product with a softly blurred warm home interior setting (wooden surface, soft natural window light), cozy lifestyle product photography look. ${FIDELITY}`,
+      "Dégradé de couleur": `Replace the background behind this exact product with a smooth elegant navy-to-gold gradient studio backdrop, soft professional lighting, premium e-commerce product photography look. ${FIDELITY}`,
+    };
+    const promptText = BACKGROUNDS[backgroundStyle] || BACKGROUNDS["Studio blanc épuré"];
+    const createResp = await fetch("https://api.dev.runwayml.com/v1/text_to_image", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${RUNWAY_API_KEY}`,
+        "X-Runway-Version": "2024-11-06",
+      },
+      body: JSON.stringify({
+        model: "gen4_image",
+        promptText,
+        referenceImages: [{ uri: imageUrl }],
+        ratio: "1024:1024",
+      }),
+    });
+    if (!createResp.ok) {
+      const detail = await createResp.text().catch(() => "");
+      throw new Error(`Runway (création) a répondu ${createResp.status} : ${detail}`);
+    }
+    const created = await createResp.json();
+    const taskId = created.id;
+    if (!taskId) throw new Error("Runway n'a pas renvoyé d'identifiant de tâche.");
+    let output = null;
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const pollResp = await fetch(`https://api.dev.runwayml.com/v1/tasks/${taskId}`, {
+        headers: { "Authorization": `Bearer ${RUNWAY_API_KEY}`, "X-Runway-Version": "2024-11-06" },
+      });
+      if (!pollResp.ok) continue;
+      const poll = await pollResp.json();
+      if (poll.status === "SUCCEEDED") { output = poll.output?.[0] || null; break; }
+      if (poll.status === "FAILED") throw new Error(poll.failure || "La génération Runway a échoué.");
+    }
+    if (!output) throw new Error("La génération prend plus de temps que prévu — réessaie dans un instant.");
+    res.json({ imageUrl: output });
+  } catch (e) {
+    console.error("Erreur pendant le changement de fond (Runway):", e);
+    res.status(500).json({ error: e.message || "Impossible de changer le fond pour l'instant." });
+  }
+});
+
 app.post("/api/products", requirePhone((req) => req.body.vendorPhone), async (req, res) => {
   const p = req.body;
   const { rows: prof } = await pool.query("SELECT suspended, landmark FROM profiles WHERE role = 'vendor' AND phone = $1", [p.vendorPhone]);
@@ -667,9 +849,9 @@ app.post("/api/products", requirePhone((req) => req.body.vendorPhone), async (re
   const videoUrls = Array.isArray(p.videoUrls) ? p.videoUrls.slice(0, 5) : (p.videoUrl ? [p.videoUrl] : []);
   const coverVideo = videoUrls[0] || p.videoUrl || "";
   await pool.query(
-    `INSERT INTO products (id, name, price, category, zone, stock, image_url, delivery_time, vendor_name, vendor_phone, created_at, description, vendor_landmark, image_urls, video_url, video_urls, tagline, ai_photo_urls)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
-    [id, p.name, p.price, p.category, p.zone, p.stock || 0, coverImage, p.deliveryTime || "Non précisé", p.vendorName, p.vendorPhone, createdAt, p.description || "", landmark, JSON.stringify(imageUrls), coverVideo, JSON.stringify(videoUrls), p.tagline || "", JSON.stringify(Array.isArray(p.aiPhotoUrls) ? p.aiPhotoUrls : [])]
+    `INSERT INTO products (id, name, price, category, zone, stock, image_url, delivery_time, vendor_name, vendor_phone, created_at, description, vendor_landmark, image_urls, video_url, video_urls, tagline, ai_photo_urls, negotiable)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+    [id, p.name, p.price, p.category, p.zone, p.stock || 0, coverImage, p.deliveryTime || "Non précisé", p.vendorName, p.vendorPhone, createdAt, p.description || "", landmark, JSON.stringify(imageUrls), coverVideo, JSON.stringify(videoUrls), p.tagline || "", JSON.stringify(Array.isArray(p.aiPhotoUrls) ? p.aiPhotoUrls : []), !!p.negotiable]
   );
   // Annonce automatique aux acheteurs — pas besoin que le propriétaire soit
   // connecté pour que les nouveautés se fassent connaître. Premier produit
@@ -709,6 +891,7 @@ app.patch("/api/products/:id", async (req, res) => {
   if (patch.deliveryTime !== undefined) { sets.push(`delivery_time = $${i++}`); vals.push(patch.deliveryTime); }
   if (patch.description !== undefined) { sets.push(`description = $${i++}`); vals.push(patch.description); }
   if (patch.tagline !== undefined) { sets.push(`tagline = $${i++}`); vals.push(patch.tagline); }
+  if (patch.negotiable !== undefined) { sets.push(`negotiable = $${i++}`); vals.push(!!patch.negotiable); }
   if (patch.vendorLandmark !== undefined) { sets.push(`vendor_landmark = $${i++}`); vals.push(patch.vendorLandmark); }
   if (Array.isArray(patch.videoUrls)) {
     const videoUrls = patch.videoUrls.slice(0, 5);
@@ -749,8 +932,24 @@ app.delete("/api/products/:id", async (req, res) => {
 });
 
 // ==================== COMMANDES ====================
+// SÉCURITÉ : ne renvoie plus toutes les commandes de tout le monde sans
+// vérification — jamais aux acheteurs/vendeurs/livreurs anonymes. Le
+// propriétaire voit tout ; les autres ne voient que les commandes liées aux
+// numéros de téléphone qu'ils ont réellement vérifiés sur cet appareil.
 app.get("/api/orders", async (req, res) => {
-  const { rows } = await pool.query("SELECT * FROM orders ORDER BY created_at DESC");
+  if (await isValidOwnerToken(req)) {
+    const { rows } = await pool.query("SELECT * FROM orders ORDER BY created_at DESC");
+    return res.json(rows.map(mapOrder));
+  }
+  const phones = await resolveTokensToPhones(req.query.phoneTokens);
+  if (phones.length === 0) return res.json([]);
+  const { rows } = await pool.query(
+    `SELECT * FROM orders
+     WHERE buyer_phone = ANY($1) OR courier_phone = ANY($1)
+       OR EXISTS (SELECT 1 FROM jsonb_array_elements(items) it WHERE it->>'vendorPhone' = ANY($1))
+     ORDER BY created_at DESC`,
+    [phones]
+  );
   res.json(rows.map(mapOrder));
 });
 
@@ -787,10 +986,42 @@ app.post("/api/orders", requirePhone((req) => req.body.buyerPhone), async (req, 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    // SÉCURITÉ : on ne fait jamais confiance aux prix envoyés par le client.
+    // Chaque article doit soit correspondre au prix affiché du produit, soit
+    // à un prix négocié accepté (et toujours valable) pour cet acheteur —
+    // sinon la commande est rejetée. Empêche de modifier le prix payé en
+    // trafiquant la requête réseau.
+    const validatedItems = [];
+    for (const item of (o.items || [])) {
+      const { rows: prodRows } = await client.query("SELECT price FROM products WHERE id = $1", [item.id]);
+      const realPrice = prodRows[0] ? Number(prodRows[0].price) : null;
+      if (realPrice !== null && Number(item.price) === realPrice) {
+        validatedItems.push(item);
+        continue;
+      }
+      const { rows: negRows } = await client.query(
+        "SELECT * FROM price_negotiations WHERE product_id = $1 AND buyer_phone = $2 AND status = 'accepted' AND expires_at > $3",
+        [item.id, o.buyerPhone, Date.now()]
+      );
+      const neg = negRows[0];
+      if (neg && Number(item.price) === Number(neg.accepted_price)) {
+        validatedItems.push(item);
+        // Le prix négocié est consommé après usage — ne peut pas resservir sur une autre commande.
+        await client.query("DELETE FROM price_negotiations WHERE id = $1", [neg.id]);
+        continue;
+      }
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: `Le prix de "${item.name || "un article"}" ne correspond plus à l'offre actuelle — actualise la page et réessaie.` });
+    }
+    o.items = validatedItems;
+    // Le total des articles est recalculé à partir des prix vérifiés
+    // ci-dessus, jamais repris tel quel du corps de la requête.
+    const validatedGoodsAmount = validatedItems.reduce((s, it) => s + Number(it.price) * Number(it.qty), 0);
     const { rows: settingsRows } = await client.query("SELECT * FROM settings WHERE id = 1");
     const feeRate = Number(settingsRows[0].fee_rate);
-    const goodsAmount = Number(o.total) - Number(o.deliveryFee || 0);
+    const goodsAmount = validatedGoodsAmount;
     const commission = Math.round(goodsAmount * feeRate);
+    o.total = goodsAmount + Number(o.deliveryFee || 0);
     const id = uid();
     const createdAt = Date.now();
     // "paid" n'est JAMAIS pris depuis le corps de la requête : une commande démarre
@@ -824,6 +1055,10 @@ app.post("/api/orders", requirePhone((req) => req.body.buyerPhone), async (req, 
       await client.query("UPDATE products SET stock = GREATEST(0, stock - $1) WHERE id = $2", [item.qty, item.id]);
     }
     await client.query("COMMIT");
+    // Alerte stock bas au vendeur — après le COMMIT, sans bloquer la réponse.
+    for (const item of (o.items || [])) {
+      checkLowStockAndNotify(item.id).catch((e) => console.error("Erreur alerte stock bas:", e));
+    }
     const { rows } = await pool.query("SELECT * FROM orders WHERE id = $1", [id]);
     res.json(mapOrder(rows[0]));
   } catch (e) {
@@ -1152,7 +1387,14 @@ app.post("/api/orders/:id/transport-confirm", requirePhone((req) => req.body.pho
 app.get("/api/profiles/:role/:phone", async (req, res) => {
   const { rows } = await pool.query("SELECT * FROM profiles WHERE role = $1 AND phone = $2", [req.params.role, req.params.phone]);
   if (!rows[0]) return res.status(404).json({ error: "Profil introuvable." });
-  res.json(mapProfile(rows[0]));
+  const profile = mapProfile(rows[0]);
+  // Le solde du portefeuille est une donnée financière — jamais visible par
+  // un tiers, seulement par la personne elle-même ou le propriétaire.
+  const tokenPhone = await getTokenPhone(req);
+  if (tokenPhone !== req.params.phone && !(await isValidOwnerToken(req))) {
+    delete profile.walletBalance;
+  }
+  res.json(profile);
 });
 
 // Crée le profil s'il n'existe pas (essai gratuit démarré maintenant), ou met juste à jour le nom sinon
@@ -2057,8 +2299,13 @@ app.post("/api/cinetpay/notify", async (req, res) => {
         // Money / carte via CinetPay) — l'argent arrive directement sur le
         // compte CinetPay du propriétaire de la plateforme, comme tous les
         // autres paiements du site.
-        await pool.query("UPDATE profiles SET wallet_balance = wallet_balance + $1 WHERE role = 'vendor' AND phone = $2", [Number(pending.amount) || 0, pending.phone]);
-        logAdminAction("Portefeuille rechargé par le vendeur", pending.phone, `+${pending.amount} F`);
+        // SÉCURITÉ : on crédite le montant confirmé par CinetPay lui-même
+        // (result.data.amount), jamais celui déclaré par le client au moment
+        // de /api/payments/pending — sinon n'importe qui pourrait gonfler son
+        // propre solde en déclarant un montant plus élevé que ce qu'il paie réellement.
+        const confirmedAmount = Number(result?.data?.amount) || 0;
+        await pool.query("UPDATE profiles SET wallet_balance = wallet_balance + $1 WHERE role = 'vendor' AND phone = $2", [confirmedAmount, pending.phone]);
+        logAdminAction("Portefeuille rechargé par le vendeur", pending.phone, `+${confirmedAmount} F`);
       } else if (pending.kind === "courier_fee" && pending.order_id) {
         // L'acheteur a payé les frais de livraison en ligne — l'argent reste
         // bloqué chez le propriétaire jusqu'à la confirmation de livraison
@@ -2296,6 +2543,26 @@ async function notifyCategoryFollowers(category, productId, productName, vendorN
   } catch (e) {
     console.error("Erreur pendant la notification de suivi de catégorie:", e);
   }
+}
+
+// Alerte au vendeur quand le stock d'un produit devient bas — évite de
+// vendre un article qu'il n'a plus. Envoyée une seule fois par produit tant
+// que le stock reste bas (pas à chaque commande).
+const LOW_STOCK_THRESHOLD = 3;
+async function checkLowStockAndNotify(productId) {
+  const { rows } = await pool.query("SELECT name, stock, vendor_phone, vendor_name FROM products WHERE id = $1", [productId]);
+  const p = rows[0];
+  if (!p || Number(p.stock) > LOW_STOCK_THRESHOLD) return;
+  if (!looksLikeEmail(p.vendor_phone)) return; // email uniquement pour l'instant, pas de SMS actif
+  if (!(await canNotify(p.vendor_phone, `low_stock_${productId}`))) return;
+  const stockTxt = Number(p.stock) === 0 ? "en rupture de stock" : `plus que ${p.stock} en stock`;
+  await sendEmail(
+    p.vendor_phone,
+    `Stock bas : "${p.name}"`,
+    `Ton produit "${p.name}" est ${stockTxt} sur Zonako. Pense à le réapprovisionner ou à ajuster ton annonce.\n\nzonabo-app.onrender.com`,
+    productEmailHtml({ heading: `Stock bas sur "${p.name}"`, bodyHtml: `Ton produit est <strong>${stockTxt}</strong> — pense à le réapprovisionner ou à ajuster ton annonce.`, ctaText: "Gérer mes produits" })
+  );
+  await logNotification(p.vendor_phone, `low_stock_${productId}`, productId);
 }
 
 // ==================== Frontend statique ====================
