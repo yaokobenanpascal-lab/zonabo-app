@@ -86,6 +86,25 @@ const RUNWAY_API_KEY = process.env.RUNWAY_API_KEY || "";
 if (!RUNWAY_API_KEY) {
   console.warn("⚠️  RUNWAY_API_KEY non définie — la génération de photo mannequin sera indisponible tant que ce n'est pas réglé.");
 }
+// Les images générées par Runway ne sont hébergées que temporairement sur
+// leurs serveurs (quelques jours) — on les re-télécharge immédiatement vers
+// Cloudinary (notre hébergement permanent, déjà utilisé pour les photos
+// classiques) pour qu'elles ne disparaissent jamais.
+async function reuploadToCloudinary(sourceUrl) {
+  const imgResp = await fetch(sourceUrl);
+  if (!imgResp.ok) throw new Error("Impossible de récupérer l'image générée.");
+  const buffer = await imgResp.arrayBuffer();
+  const form = new FormData();
+  form.append("file", new Blob([buffer]), "generated.png");
+  form.append("upload_preset", "zonako_uploads");
+  const uploadResp = await fetch("https://api.cloudinary.com/v1_1/kylr0amb/image/upload", { method: "POST", body: form });
+  if (!uploadResp.ok) {
+    const detail = await uploadResp.text().catch(() => "");
+    throw new Error(`Cloudinary a répondu ${uploadResp.status} : ${detail}`);
+  }
+  const data = await uploadResp.json();
+  return data.secure_url;
+}
 
 async function sendEmail(to, subject, textContent, htmlContent) {
   if (!EMAIL_CONFIGURED) {
@@ -770,7 +789,8 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
       if (poll.status === "FAILED") throw new Error(poll.failure || "La génération Runway a échoué.");
     }
     if (!output) throw new Error("La génération prend plus de temps que prévu — réessaie dans un instant.");
-    res.json({ imageUrl: output });
+    const permanentUrl = await reuploadToCloudinary(output);
+    res.json({ imageUrl: permanentUrl });
   } catch (e) {
     console.error("Erreur pendant la génération de photo mannequin (Runway):", e);
     res.status(500).json({ error: e.message || "Impossible de générer la photo mannequin pour l'instant." });
@@ -827,7 +847,8 @@ app.post("/api/products/change-background", requirePhone((req) => req.body.vendo
       if (poll.status === "FAILED") throw new Error(poll.failure || "La génération Runway a échoué.");
     }
     if (!output) throw new Error("La génération prend plus de temps que prévu — réessaie dans un instant.");
-    res.json({ imageUrl: output });
+    const permanentUrl = await reuploadToCloudinary(output);
+    res.json({ imageUrl: permanentUrl });
   } catch (e) {
     console.error("Erreur pendant le changement de fond (Runway):", e);
     res.status(500).json({ error: e.message || "Impossible de changer le fond pour l'instant." });
