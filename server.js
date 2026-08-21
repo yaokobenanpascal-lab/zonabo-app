@@ -604,6 +604,14 @@ app.post("/api/negotiations", requirePhone((req) => req.body.buyerPhone), async 
     [uid(), productId, buyerPhone, product.vendor_phone, product.price, proposedPrice, now]
   );
   logAdminAction("Négociation de prix ouverte", product.vendor_phone, `${product.name} — proposé ${proposedPrice} F`);
+  if (looksLikeEmail(product.vendor_phone)) {
+    sendEmail(
+      product.vendor_phone,
+      `Nouvelle proposition de prix — "${product.name}"`,
+      `Un acheteur propose ${Number(proposedPrice).toLocaleString("fr-FR")} F pour "${product.name}" (prix affiché : ${Number(product.price).toLocaleString("fr-FR")} F). Connecte-toi sur Zonako pour accepter, refuser, ou faire une contre-proposition.\n\nzonabo-app.onrender.com`,
+      productEmailHtml({ heading: `Nouvelle proposition — "${product.name}"`, bodyHtml: `Un acheteur propose <strong>${Number(proposedPrice).toLocaleString("fr-FR")} F</strong> (prix affiché : ${Number(product.price).toLocaleString("fr-FR")} F). Réponds depuis ton tableau de bord.`, ctaText: "Répondre à la proposition" })
+    ).catch((e) => console.error("Erreur email négociation (vendeur):", e));
+  }
   const { rows } = await pool.query("SELECT * FROM price_negotiations WHERE product_id = $1 AND buyer_phone = $2", [productId, buyerPhone]);
   res.json(mapNegotiation(rows[0]));
 });
@@ -642,6 +650,31 @@ app.post("/api/negotiations/:id/respond", requirePhone((req) => req.body.phone),
     );
   } else {
     return res.status(400).json({ error: "Action invalide." });
+  }
+  // Notifie l'autre partie de la réponse — utile car les deux ne sont pas
+  // toujours connectés en même temps.
+  const { rows: prodRows2 } = await pool.query("SELECT name FROM products WHERE id = $1", [neg.product_id]);
+  const productName = prodRows2[0]?.name || "un article";
+  const recipient = isBuyer ? neg.vendor_phone : neg.buyer_phone;
+  if (looksLikeEmail(recipient)) {
+    let subject, bodyText, bodyHtml, ctaText;
+    if (action === "accept") {
+      subject = `Prix accepté — "${productName}"`;
+      bodyText = `Bonne nouvelle : ta négociation sur "${productName}" a été acceptée à ${Number(neg.proposed_price).toLocaleString("fr-FR")} F. Valable 24h sur Zonako.`;
+      bodyHtml = `Bonne nouvelle : ta négociation sur "${productName}" a été <strong>acceptée à ${Number(neg.proposed_price).toLocaleString("fr-FR")} F</strong> — valable 24h.`;
+      ctaText = "Commander maintenant";
+    } else if (action === "reject") {
+      subject = `Proposition refusée — "${productName}"`;
+      bodyText = `Ta proposition de prix sur "${productName}" n'a pas été retenue cette fois.`;
+      bodyHtml = `Ta proposition de prix sur "${productName}" n'a pas été retenue cette fois.`;
+      ctaText = "Voir le produit";
+    } else {
+      subject = `Contre-proposition — "${productName}"`;
+      bodyText = `Une contre-proposition à ${Number(counterPrice).toLocaleString("fr-FR")} F a été faite sur "${productName}". Connecte-toi pour répondre.`;
+      bodyHtml = `Une contre-proposition à <strong>${Number(counterPrice).toLocaleString("fr-FR")} F</strong> a été faite sur "${productName}".`;
+      ctaText = "Répondre";
+    }
+    sendEmail(recipient, subject, `${bodyText}\n\nzonabo-app.onrender.com`, productEmailHtml({ heading: subject, bodyHtml, ctaText })).catch((e) => console.error("Erreur email négociation:", e));
   }
   const { rows: r2 } = await pool.query("SELECT * FROM price_negotiations WHERE id = $1", [req.params.id]);
   res.json(mapNegotiation(r2[0]));
