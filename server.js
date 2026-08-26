@@ -755,7 +755,9 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
   // article (pantalon, chemise, chapeau, chaussures, montre...) — pour que
   // l'IA les combine toutes sur un même mannequin, plutôt qu'une seule photo
   // groupée.
-  const refUrls = Array.isArray(imageUrls) && imageUrls.length ? imageUrls.slice(0, 5) : [imageUrl];
+  // Runway limite à 3 photos de référence maximum par génération (au-delà,
+  // il renvoie une erreur de validation) — confirmé par un test réel.
+  const refUrls = Array.isArray(imageUrls) && imageUrls.length ? imageUrls.slice(0, 3) : [imageUrl];
   try {
     // Chaque type de produit demande une mise en scène différente — un
     // mannequin torse ne convient qu'aux vêtements, pas à une montre ou des
