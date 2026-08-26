@@ -2723,7 +2723,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
       // plusieurs angles du MÊME article risqueraient de perturber l'IA.
       const realPhotos = form.imageUrls.filter((u) => !form.aiPhotoUrls.includes(u));
       const isEnsemble = displayType === "Ensemble complet (plusieurs articles)";
-      const refUrls = isEnsemble ? realPhotos : [realPhotos[0]];
+      const refUrls = isEnsemble ? realPhotos.slice(0, 3) : [realPhotos[0]];
       const { imageUrl } = await apiSend("/api/products/generate-mannequin-photo", "POST", { vendorPhone: vendorInfo.phone, imageUrl: refUrls[0], imageUrls: refUrls, displayType, pose: mannequinPose, style: mannequinStyle }, getPhoneToken(vendorInfo.phone));
       // La photo générée passe en premier (couverture) — c'est elle que
       // l'acheteur voit en premier, avant les photos brutes du vendeur.
@@ -3074,7 +3074,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                 <div className="mt-2 bg-[#14213D]/5 rounded-lg p-2.5">
                   <p className="f-mono text-[10px] uppercase tracking-wide text-[#14213D]/50 mb-1.5">✨ Photo de présentation produit (IA, expérimental)</p>
                   {displayType === "Ensemble complet (plusieurs articles)" && (
-                    <p className="f-body text-[10px] text-[#946B00] bg-[#946B00]/10 rounded-lg px-2 py-1.5 mb-1.5">💡 Ajoute une photo séparée pour chaque article de l'ensemble (pantalon, chemise, chapeau, chaussures, montre...) dans ta galerie ci-dessus — l'IA les combinera toutes sur un même mannequin.</p>
+                    <p className="f-body text-[10px] text-[#946B00] bg-[#946B00]/10 rounded-lg px-2 py-1.5 mb-1.5">💡 Ajoute jusqu'à 3 photos séparées (une par article : pantalon, chemise, chapeau, chaussures, montre...) dans ta galerie ci-dessus — l'IA les combinera sur un même mannequin. Au-delà de 3, seules les 3 premières seront utilisées.</p>
                   )}
                   <select value={displayType} onChange={(e) => setDisplayType(e.target.value)} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-xs mb-1.5">
                     <option>Vêtement femme</option>
