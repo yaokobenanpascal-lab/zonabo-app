@@ -778,10 +778,16 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
       `A white plastic full-body ${gender}-presenting display mannequin (head to toe, including a head form) wearing the complete outfit exactly as shown in the reference photo — including any headwear, veil, headscarf or hat if part of the item(s) shown, ${poseText}, ${STUDIO_BASE}`;
     const FORMAL_SUIT =
       `A white plastic full-body male-presenting display mannequin (head to toe, including a head form) wearing this exact complete formal suit exactly as shown in the reference photo (jacket, trousers, and any vest, tie or accessories included), premium tailored menswear presentation, sharp confident posture, ${poseText}, ${STUDIO_BASE}`;
+    // Ensemble vendu comme UN SEUL produit (un seul prix) — tous les articles
+    // montrés sur la photo de référence doivent apparaître ensemble, quel que
+    // soit leur type (vêtement, chaussures, montre, sac, bijoux...).
+    const ENSEMBLE =
+      `A white plastic full-body display mannequin (head to toe, including a head form) wearing and displaying every single item shown in the reference photo together, as a complete matching set — clothing worn naturally on the mannequin body, and any accessories (shoes, watch, bag, jewelry, hat, or similar) placed or worn exactly where they would naturally go, all items visible at once, ${poseText}, ${STUDIO_BASE}`;
     const PROMPTS = {
       "Vêtement femme": FULL_BODY_CLOTHING("female"),
       "Vêtement homme": FULL_BODY_CLOTHING("male"),
       "Costume / Tenue formelle": FORMAL_SUIT,
+      "Ensemble complet (plusieurs articles)": ENSEMBLE,
       "Vêtement bébé / enfant": `This exact baby or children's garment displayed neatly on a small soft-padded infant display form or flat-laid with gentle folds, warm and clean nursery-style presentation, ${STUDIO_BASE}`,
       "Chaussures": `A pair of this exact shoes displayed on a minimal clear acrylic shoe stand, front three-quarter angle, floating slightly above a neutral ground plane, ${STUDIO_BASE}`,
       "Montre": `A close-up of this exact watch worn on a neutral light-toned wrist, arm resting naturally at a slight angle, focus sharp on the watch face and strap, ${STUDIO_BASE}`,
