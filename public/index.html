@@ -3070,6 +3070,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                     <option>Vêtement femme</option>
                     <option>Vêtement homme</option>
                     <option>Costume / Tenue formelle</option>
+                    <option>Ensemble complet (plusieurs articles)</option>
                     <option>Vêtement bébé / enfant</option>
                     <option>Chaussures</option>
                     <option>Montre</option>
@@ -3082,7 +3083,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                     <option>Jouet / Enfant</option>
                     <option>Véhicule / Engin</option>
                   </select>
-                  {(displayType === "Vêtement femme" || displayType === "Vêtement homme" || displayType === "Costume / Tenue formelle") && (
+                  {(displayType === "Vêtement femme" || displayType === "Vêtement homme" || displayType === "Costume / Tenue formelle" || displayType === "Ensemble complet (plusieurs articles)") && (
                     <select value={mannequinPose} onChange={(e) => setMannequinPose(e.target.value)} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-xs mb-1.5">
                       <option>Face</option>
                       <option>Trois-quarts</option>
