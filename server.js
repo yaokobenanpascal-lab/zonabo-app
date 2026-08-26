@@ -748,8 +748,14 @@ app.post("/api/products/generate-description", requirePhone((req) => req.body.ve
 // contrairement aux autres intégrations (Cloudinary, Anthropic) déjà vérifiées.
 app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.body.vendorPhone), async (req, res) => {
   if (!RUNWAY_API_KEY) return res.status(500).json({ error: "La génération de photo mannequin n'est pas encore configurée sur le serveur." });
-  const { imageUrl, displayType, pose, style } = req.body;
+  const { imageUrl, imageUrls, displayType, pose, style } = req.body;
   if (!imageUrl) return res.status(400).json({ error: "Choisis d'abord une photo de l'article." });
+  // Pour un ensemble complet (plusieurs articles vendus comme un seul
+  // produit), on peut fournir jusqu'à 5 photos de référence — une par
+  // article (pantalon, chemise, chapeau, chaussures, montre...) — pour que
+  // l'IA les combine toutes sur un même mannequin, plutôt qu'une seule photo
+  // groupée.
+  const refUrls = Array.isArray(imageUrls) && imageUrls.length ? imageUrls.slice(0, 5) : [imageUrl];
   try {
     // Chaque type de produit demande une mise en scène différente — un
     // mannequin torse ne convient qu'aux vêtements, pas à une montre ou des
@@ -780,9 +786,10 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
       `A white plastic full-body male-presenting display mannequin (head to toe, including a head form) wearing this exact complete formal suit exactly as shown in the reference photo (jacket, trousers, and any vest, tie or accessories included), premium tailored menswear presentation, sharp confident posture, ${poseText}, ${STUDIO_BASE}`;
     // Ensemble vendu comme UN SEUL produit (un seul prix) — tous les articles
     // montrés sur la photo de référence doivent apparaître ensemble, quel que
-    // soit leur type (vêtement, chaussures, montre, sac, bijoux...).
+    // soit leur type (vêtement, chaussures, montre, sac, bijoux...). Jusqu'à
+    // 5 photos séparées (une par article) peuvent être fournies en référence.
     const ENSEMBLE =
-      `A white plastic full-body display mannequin (head to toe, including a head form) wearing and displaying every single item shown in the reference photo together, as a complete matching set — clothing worn naturally on the mannequin body, and any accessories (shoes, watch, bag, jewelry, hat, or similar) placed or worn exactly where they would naturally go, all items visible at once, ${poseText}, ${STUDIO_BASE}`;
+      `A white plastic full-body display mannequin (head to toe, including a head form) wearing and displaying every single item shown across ALL the reference photos together, as one complete matching set from a single outfit — clothing worn naturally on the mannequin body, and any accessories (shoes, watch, bag, jewelry, hat, or similar) placed or worn exactly where they would naturally go, all items combined and visible at once on the same mannequin, ${poseText}, ${STUDIO_BASE}`;
     const PROMPTS = {
       "Vêtement femme": FULL_BODY_CLOTHING("female"),
       "Vêtement homme": FULL_BODY_CLOTHING("male"),
@@ -811,7 +818,7 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
       body: JSON.stringify({
         model: "gen4_image",
         promptText,
-        referenceImages: [{ uri: imageUrl }],
+        referenceImages: refUrls.map((uri) => ({ uri })),
         ratio: "1024:1024",
       }),
     });
