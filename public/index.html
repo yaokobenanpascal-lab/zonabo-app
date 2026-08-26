@@ -563,6 +563,52 @@ function VendorTrustBadge({ phone }) {
 const VEHICLE_LABELS = { moto: "🏍️ Moto", velo: "🚲 Vélo", voiture: "🚗 Voiture", tricycle: "🛺 Tricycle", pied: "🚶 À pied" };
 // Galerie photo d'un produit — s'ouvre en plein écran, navigation par flèches
 // ou par points, pour montrer plusieurs angles d'un même article.
+// Page "boutique" d'un vendeur — tous ses articles réels, avec leurs vrais
+// prix toujours à jour (pas une image générée, pour rester fiable et exacte).
+function VendorBoutiqueView({ vendorPhone, products, onClose, onOpenProduct }) {
+  const items = products.filter((p) => p.vendorPhone === vendorPhone);
+  const vendorName = items[0]?.vendorName || "Boutique";
+  const landmark = items[0]?.vendorLandmark || "";
+  return (
+    <div className="fixed inset-0 bg-[#FBF7F0] z-40 overflow-y-auto">
+      <div className="sticky top-0 bg-[#14213D] text-white px-4 py-4 z-10">
+        <button onClick={onClose} className="f-mono text-xs bg-white/10 px-3 py-1.5 rounded-full mb-3">← Retour</button>
+        <h2 className="f-display font-semibold text-xl">{vendorName}</h2>
+        <div className="mt-1"><VendorTrustBadge phone={vendorPhone} /></div>
+        <div className="flex items-center gap-2 mt-1">
+          <RatingBadge phone={vendorPhone} />
+          {landmark && <span className="f-mono text-[10px] text-white/50">· 📍 {landmark}</span>}
+        </div>
+        <p className="f-mono text-xs text-white/50 mt-1">{items.length} article{items.length > 1 ? "s" : ""}</p>
+      </div>
+      <div className="max-w-5xl mx-auto p-4">
+        {items.length === 0 ? (
+          <p className="f-body text-sm text-[#14213D]/40 text-center py-10">Aucun article disponible pour l'instant.</p>
+        ) : (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            {items.map((p) => (
+              <div key={p.id} onClick={() => onOpenProduct(p)} className="ticket bg-white border-2 border-[#14213D]/10 overflow-hidden flex flex-col cursor-pointer">
+                <div className="aspect-[3/4] bg-[#FBF7F0] overflow-hidden relative">
+                  {p.videoUrl ? (
+                    <video src={p.videoUrl} autoPlay muted loop playsInline className="w-full h-full object-cover" />
+                  ) : p.imageUrl ? (
+                    <img src={enhancedImageUrl(p.imageUrl)} alt={p.name} className="w-full h-full object-cover" />
+                  ) : null}
+                  {p.negotiable && <span className="absolute top-1.5 left-1.5 f-mono text-[9px] bg-[#14213D]/80 text-white px-1.5 py-0.5 rounded-full">💬</span>}
+                </div>
+                <div className="p-2.5">
+                  <p className="f-display font-semibold text-[#14213D] text-xs leading-snug line-clamp-2">{p.name}</p>
+                  <p className="f-mono text-xs text-[#C1440E] font-semibold mt-1">{p.price.toLocaleString("fr-FR")} F</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ProductGalleryModal({ product, onClose, buyerPhone, addToCart }) {
   const [index, setIndex] = useState(0);
   const [buyerPhotos, setBuyerPhotos] = useState([]);
@@ -1765,6 +1811,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
   const [search, setSearch] = useState("");
   const [visibleCount, setVisibleCount] = useState(20);
   const [galleryProduct, setGalleryProduct] = useState(null);
+  const [viewingVendor, setViewingVendor] = useState(null);
   const [favorites, setFavorites] = useState([]);
   const [followedCategories, setFollowedCategories] = useState([]);
   useEffect(() => {
@@ -2109,7 +2156,10 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                     <div className="flex items-start justify-between gap-2">
                       <h4 className="f-display font-semibold text-[#14213D] text-sm leading-snug">{p.name}</h4>
                     </div>
-                    <p className="f-mono text-[10px] text-[#14213D]/40 mt-1 flex items-center gap-1.5">{p.vendorName} · {zoneLabel(p.zone)} <RatingBadge phone={p.vendorPhone} compact /></p>
+                    <p className="f-mono text-[10px] text-[#14213D]/40 mt-1 flex items-center gap-1.5">
+                      <button onClick={(e) => { e.stopPropagation(); setViewingVendor(p.vendorPhone); }} className="hover:text-[#14213D] hover:underline">{p.vendorName}</button>
+                      · {zoneLabel(p.zone)} <RatingBadge phone={p.vendorPhone} compact />
+                    </p>
                     <div className="mt-0.5"><VendorTrustBadge phone={p.vendorPhone} /></div>
                     {p.description && <p className="f-body text-[11px] text-[#14213D]/50 mt-1 line-clamp-2">{p.description}</p>}
                     <div className="flex items-center gap-2 mt-2">
@@ -2460,6 +2510,14 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
         </div>
       )}
       {galleryProduct && <ProductGalleryModal product={galleryProduct} onClose={() => setGalleryProduct(null)} buyerPhone={buyerInfo.phone} addToCart={addToCart} />}
+      {viewingVendor && (
+        <VendorBoutiqueView
+          vendorPhone={viewingVendor}
+          products={products}
+          onClose={() => setViewingVendor(null)}
+          onOpenProduct={(p) => setGalleryProduct(p)}
+        />
+      )}
       {receiptOrder && <ReceiptModal order={receiptOrder} onClose={() => setReceiptOrder(null)} />}
     </div>
   );
@@ -2506,6 +2564,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
   const [generatingBackground, setGeneratingBackground] = useState(false);
   const [backgroundError, setBackgroundError] = useState("");
   const [mannequinPose, setMannequinPose] = useState("Trois-quarts");
+  const [mannequinStyle, setMannequinStyle] = useState("Studio épuré");
   const [mannequinError, setMannequinError] = useState("");
   const [certifiedAccurate, setCertifiedAccurate] = useState(false);
   const [uploadingImg, setUploadingImg] = useState(false);
@@ -2658,7 +2717,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
     setGeneratingMannequin(true);
     setMannequinError("");
     try {
-      const { imageUrl } = await apiSend("/api/products/generate-mannequin-photo", "POST", { vendorPhone: vendorInfo.phone, imageUrl: form.imageUrls[0], displayType, pose: mannequinPose }, getPhoneToken(vendorInfo.phone));
+      const { imageUrl } = await apiSend("/api/products/generate-mannequin-photo", "POST", { vendorPhone: vendorInfo.phone, imageUrl: form.imageUrls[0], displayType, pose: mannequinPose, style: mannequinStyle }, getPhoneToken(vendorInfo.phone));
       // La photo générée passe en premier (couverture) — c'est elle que
       // l'acheteur voit en premier, avant les photos brutes du vendeur.
       // On la marque aussi comme "générée par IA" pour le badge acheteur et
@@ -3029,6 +3088,14 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                       <option>Trois-quarts</option>
                       <option>Profil</option>
                       <option>Dos</option>
+                    </select>
+                  )}
+                  {displayType !== "Maison / Déco" && displayType !== "Véhicule / Engin" && (
+                    <select value={mannequinStyle} onChange={(e) => setMannequinStyle(e.target.value)} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-xs mb-1.5">
+                      <option>Studio épuré</option>
+                      <option>Boutique chic</option>
+                      <option>Extérieur lifestyle</option>
+                      <option>Ambiance colorée</option>
                     </select>
                   )}
                   <button disabled={generatingMannequin} onClick={generateMannequinPhoto} className="w-full f-mono text-xs bg-[#14213D] disabled:opacity-40 text-white py-2 rounded-lg">
