@@ -748,13 +748,22 @@ app.post("/api/products/generate-description", requirePhone((req) => req.body.ve
 // contrairement aux autres intégrations (Cloudinary, Anthropic) déjà vérifiées.
 app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.body.vendorPhone), async (req, res) => {
   if (!RUNWAY_API_KEY) return res.status(500).json({ error: "La génération de photo mannequin n'est pas encore configurée sur le serveur." });
-  const { imageUrl, displayType, pose } = req.body;
+  const { imageUrl, displayType, pose, style } = req.body;
   if (!imageUrl) return res.status(400).json({ error: "Choisis d'abord une photo de l'article." });
   try {
     // Chaque type de produit demande une mise en scène différente — un
     // mannequin torse ne convient qu'aux vêtements, pas à une montre ou des
     // bijoux, qui ont besoin de leur propre présentation.
-    const STUDIO_BASE = "shot in a minimal e-commerce studio setting, pure white seamless background, soft diffused front lighting with subtle fill from both sides, no shadows, clean product photography aesthetic, no extra props. CRITICAL: this must be the EXACT same item(s) as in the reference photo — do not alter, reinterpret, or invent colors, shapes, patterns, prints, textures or materials in any way. Only change the setting/framing/presentation around it, never the item itself.";
+    const FIDELITY = "CRITICAL: this must be the EXACT same item(s) as in the reference photo — do not alter, reinterpret, or invent colors, shapes, patterns, prints, textures or materials in any way. Only change the setting/framing/presentation around it, never the item itself.";
+    // Choix du style/décor général — applicable à la plupart des catégories,
+    // pour donner un vrai choix de mise en scène plutôt qu'un seul rendu fixe.
+    const STYLES = {
+      "Studio épuré": `shot in a minimal e-commerce studio setting, pure white seamless background, soft diffused front lighting with subtle fill from both sides, no shadows, clean product photography aesthetic, no extra props. ${FIDELITY}`,
+      "Boutique chic": `shot inside an upscale boutique retail interior, warm ambient ceiling spotlights, softly blurred wooden shelving and premium display fixtures in the background, elegant retail photography aesthetic. ${FIDELITY}`,
+      "Extérieur lifestyle": `shot outdoors in soft natural daylight, a softly blurred greenery or warm urban backdrop, relaxed authentic lifestyle product photography look. ${FIDELITY}`,
+      "Ambiance colorée": `shot against a bold solid-color studio backdrop (deep navy blue or warm gold tone), dramatic directional studio lighting, striking modern premium product photography look. ${FIDELITY}`,
+    };
+    const STUDIO_BASE = STYLES[style] || STYLES["Studio épuré"];
     const POSES = {
       "Face": "standing straight, facing the camera directly",
       "Trois-quarts": "standing at a slight three-quarter angle toward the camera",
@@ -768,7 +777,7 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
     const FULL_BODY_CLOTHING = (gender) =>
       `A white plastic full-body ${gender}-presenting display mannequin (head to toe, including a head form) wearing the complete outfit exactly as shown in the reference photo — including any headwear, veil, headscarf or hat if part of the item(s) shown, ${poseText}, ${STUDIO_BASE}`;
     const FORMAL_SUIT =
-      `A white plastic full-body male-presenting display mannequin (head to toe, including a head form) wearing this exact complete formal suit exactly as shown in the reference photo (jacket, trousers, and any vest, tie or accessories included), premium tailored menswear presentation, sharp confident posture, ${poseText}, elegant upscale boutique studio lighting with a subtle soft gradient backdrop instead of flat white, refined and polished product photography aesthetic. CRITICAL: this must be the EXACT same suit as in the reference photo — do not alter, reinterpret, or invent its color, cut, pattern, texture or material in any way. Only change the setting/framing/presentation around it, never the item itself.`;
+      `A white plastic full-body male-presenting display mannequin (head to toe, including a head form) wearing this exact complete formal suit exactly as shown in the reference photo (jacket, trousers, and any vest, tie or accessories included), premium tailored menswear presentation, sharp confident posture, ${poseText}, ${STUDIO_BASE}`;
     const PROMPTS = {
       "Vêtement femme": FULL_BODY_CLOTHING("female"),
       "Vêtement homme": FULL_BODY_CLOTHING("male"),
@@ -779,7 +788,7 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
       "Bijoux": `This exact jewelry piece elegantly presented on a minimal white jewelry display stand (bust, ring cone, or earring card as appropriate to the item type), ${STUDIO_BASE}`,
       "Sac / Accessoire": `This exact bag or accessory placed upright on a minimal round pedestal, front three-quarter angle, ${STUDIO_BASE}`,
       "Électronique / Téléphone": `This exact electronic device or phone displayed upright on a minimal tech-style pedestal stand, screen angled slightly toward camera if applicable, ${STUDIO_BASE}`,
-      "Maison / Déco": `This exact home or decor item staged naturally within a tastefully minimal, softly lit interior setting (neutral shelf, table or console), giving a sense of scale and real use, ${STUDIO_BASE.replace("pure white seamless background, ", "")}`,
+      "Maison / Déco": `This exact home or decor item staged naturally within a tastefully minimal, softly lit interior setting (neutral shelf, table or console), giving a sense of scale and real use. ${FIDELITY}`,
       "Cuisine / Ustensiles": `This exact kitchen item staged neatly on a clean light-toned countertop, slight overhead-angled product shot, ${STUDIO_BASE}`,
       "Beauté / Cosmétique": `This exact beauty or cosmetic product displayed upright on a minimal elegant vanity-style pedestal, ${STUDIO_BASE}`,
       "Jouet / Enfant": `This exact toy or children's item displayed upright on a clean minimal surface, playful but tidy product photography style, ${STUDIO_BASE}`,
