@@ -2717,7 +2717,14 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
     setGeneratingMannequin(true);
     setMannequinError("");
     try {
-      const { imageUrl } = await apiSend("/api/products/generate-mannequin-photo", "POST", { vendorPhone: vendorInfo.phone, imageUrl: form.imageUrls[0], displayType, pose: mannequinPose, style: mannequinStyle }, getPhoneToken(vendorInfo.phone));
+      // On ne transmet plusieurs photos à la fois que pour "Ensemble complet"
+      // (chaque photo = un article différent à combiner) — pour toutes les
+      // autres catégories, une seule photo de référence reste utilisée, sinon
+      // plusieurs angles du MÊME article risqueraient de perturber l'IA.
+      const realPhotos = form.imageUrls.filter((u) => !form.aiPhotoUrls.includes(u));
+      const isEnsemble = displayType === "Ensemble complet (plusieurs articles)";
+      const refUrls = isEnsemble ? realPhotos : [realPhotos[0]];
+      const { imageUrl } = await apiSend("/api/products/generate-mannequin-photo", "POST", { vendorPhone: vendorInfo.phone, imageUrl: refUrls[0], imageUrls: refUrls, displayType, pose: mannequinPose, style: mannequinStyle }, getPhoneToken(vendorInfo.phone));
       // La photo générée passe en premier (couverture) — c'est elle que
       // l'acheteur voit en premier, avant les photos brutes du vendeur.
       // On la marque aussi comme "générée par IA" pour le badge acheteur et
@@ -3066,6 +3073,9 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
               {form.imageUrls[0] && form.imageUrls.length < 5 && (
                 <div className="mt-2 bg-[#14213D]/5 rounded-lg p-2.5">
                   <p className="f-mono text-[10px] uppercase tracking-wide text-[#14213D]/50 mb-1.5">✨ Photo de présentation produit (IA, expérimental)</p>
+                  {displayType === "Ensemble complet (plusieurs articles)" && (
+                    <p className="f-body text-[10px] text-[#946B00] bg-[#946B00]/10 rounded-lg px-2 py-1.5 mb-1.5">💡 Ajoute une photo séparée pour chaque article de l'ensemble (pantalon, chemise, chapeau, chaussures, montre...) dans ta galerie ci-dessus — l'IA les combinera toutes sur un même mannequin.</p>
+                  )}
                   <select value={displayType} onChange={(e) => setDisplayType(e.target.value)} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-xs mb-1.5">
                     <option>Vêtement femme</option>
                     <option>Vêtement homme</option>
