@@ -2648,6 +2648,20 @@ async function checkLowStockAndNotify(productId) {
   await logNotification(p.vendor_phone, `low_stock_${productId}`, productId);
 }
 
+// Route diagnostique TEMPORAIRE — révèle l'adresse IP sortante réelle du
+// serveur, pour la renseigner dans la liste blanche IP de CinetPay. À
+// retirer une fois cette information récupérée (pas destinée à rester en
+// production indéfiniment).
+app.get("/api/diag/outbound-ip", async (req, res) => {
+  try {
+    const r = await fetch("https://api.ipify.org?format=json");
+    const data = await r.json();
+    res.json({ outboundIp: data.ip });
+  } catch (e) {
+    res.status(500).json({ error: "Impossible de déterminer l'adresse IP sortante." });
+  }
+});
+
 // ==================== Frontend statique ====================
 app.use(express.static(path.join(__dirname, "public")));
 app.get("*", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
