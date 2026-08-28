@@ -16,7 +16,6 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.25.0/babel.min.js"></script>
-<script src="https://cdn.cinetpay.com/seamless/main.js"></script>
 <style>
   body { margin: 0; }
   /* Effet "Ken Burns" — léger zoom lent en boucle sur les photos produit
@@ -80,19 +79,9 @@ const DEFAULT_TRIAL_DAYS = 7; // jours d'essai gratuit avant de devoir payer l'a
 // code, stocké uniquement dans le localStorage de cet appareil (voir OwnerView).
 
 // --- Configuration CinetPay ---
-// Remplace apikey et site_id par tes identifiants marchand (Espace CinetPay > Intégration).
-// mode: "SANDBOX" pour tester sans vrai argent, "PRODUCTION" une fois validé par CinetPay.
-// notify_url: à héberger plus tard sur un petit backend qui reçoit la confirmation
-// serveur-à-serveur de CinetPay (voir note en fin de fichier). En attendant, le paiement
-// fonctionne quand même côté client grâce à CinetPay.waitResponse().
-const CINETPAY_CONFIG = {
-  apikey: "REMPLACE_PAR_TON_APIKEY_CINETPAY",
-  site_id: "REMPLACE_PAR_TON_SITE_ID_CINETPAY",
-  mode: "SANDBOX",
-  // Remplace par ton vrai domaine une fois déployé (ex: https://zonako-backend.onrender.com/api/cinetpay/notify).
-  // Cette route est gérée par server.js et vérifie chaque paiement auprès de CinetPay avant de le valider.
-  notify_url: "https://ton-domaine.com/api/cinetpay/notify",
-};
+// Les paiements CinetPay sont maintenant initiés côté serveur (nouvelle API
+// "Aurore") — voir launchCinetPayPayment() plus bas. Plus besoin de clé ou
+// d'identifiant marchand ici, côté client.
 
 // Upload de photos produit : Cloudinary permet un envoi direct depuis le
 // navigateur (sans passer par le serveur), avec un plan gratuit généreux.
@@ -271,47 +260,19 @@ function uid() {
 }
 
 // Lance un paiement CinetPay générique (utilisé pour les abonnements vendeur/livreur).
-// L'argent est collecté directement sur le compte marchand CinetPay du propriétaire
-// (celui associé à CINETPAY_CONFIG.site_id) — voir la note en fin de fichier pour
-// savoir où configurer le compte de règlement (bancaire/mobile money) côté CinetPay.
-function launchCinetPaySubscription({ transactionId, amount, description, customer, onSuccess, onError }) {
-  if (!window.CinetPay) {
-    onError && onError("Le module de paiement n'a pas pu se charger (vérifie ta connexion internet).");
-    return;
+// Lance un paiement CinetPay (nouvelle API "Aurore") — le serveur initie le
+// paiement lui-même (montant calculé à partir de données fiables, jamais
+// celui du navigateur) et renvoie un lien vers lequel on redirige l'acheteur.
+// Contrairement à l'ancien guichet JavaScript, il n'y a plus de fenêtre
+// intégrée : la personne quitte Zonako, paie sur la page CinetPay, puis
+// revient automatiquement (success_url / failed_url gérées côté serveur).
+async function launchCinetPayPayment({ kind, orderId, role, phone, amount, onError }) {
+  try {
+    const { paymentUrl } = await apiSend("/api/cinetpay/init-payment", "POST", { kind, orderId, role, phone, amount });
+    window.location.href = paymentUrl;
+  } catch (e) {
+    onError && onError(e.message || "Impossible de lancer le paiement pour l'instant.");
   }
-  const [firstName, ...rest] = (customer.name || "Zonako").trim().split(" ");
-  window.CinetPay.setConfig({
-    apikey: CINETPAY_CONFIG.apikey,
-    site_id: CINETPAY_CONFIG.site_id,
-    mode: CINETPAY_CONFIG.mode,
-    notify_url: CINETPAY_CONFIG.notify_url,
-  });
-  window.CinetPay.getCheckout({
-    transaction_id: transactionId,
-    amount,
-    currency: "XOF",
-    channels: "ALL",
-    description,
-    customer_name: firstName,
-    customer_surname: rest.join(" ") || firstName,
-    customer_phone_number: customer.phone,
-    customer_address: "Côte d'Ivoire",
-    customer_city: "Abidjan",
-    customer_country: "CI",
-    customer_state: "CI",
-    customer_zip_code: "00225",
-  });
-  window.CinetPay.waitResponse((data) => {
-    if (data.status === "ACCEPTED") {
-      onSuccess && onSuccess(transactionId);
-    } else {
-      onError && onError("Paiement refusé ou annulé.");
-    }
-  });
-  window.CinetPay.onError((data) => {
-    onError && onError("Une erreur est survenue pendant le paiement. Réessaie dans un instant.");
-    console.error("Erreur CinetPay (abonnement):", data);
-  });
 }
 
 // Filet de sécurité "essai + abonnement" : calcule si un vendeur/livreur a encore
@@ -346,51 +307,24 @@ function SubscriptionGate({ role, info, trialDays, accessFee, color, children })
     setTopupError("");
     setTopupNotice("");
     setTopupBusy(true);
-    try {
-      const transactionId = `ZK-WALLET-${info.phone}-${Date.now()}`;
-      await apiSend("/api/payments/pending", "POST", { transactionId, kind: "wallet_topup", phone: info.phone, amount });
-      launchCinetPaySubscription({
-        transactionId,
-        amount,
-        description: `Recharge portefeuille Zonako Vendeur`,
-        customer: { name: info.name, phone: info.phone },
-        onSuccess: () => {
-          setTopupBusy(false);
-          setTopupNotice("Paiement reçu — vérification en cours, ton portefeuille sera crédité dans quelques instants.");
-        },
-        onError: (msg) => { setTopupBusy(false); setTopupError(msg); },
-      });
-    } catch (e) {
-      setTopupBusy(false);
-      setTopupError("Erreur pendant la préparation du paiement. Réessaie.");
-    }
+    launchCinetPayPayment({
+      kind: "wallet_topup",
+      phone: info.phone,
+      amount,
+      onError: (msg) => { setTopupBusy(false); setTopupError(msg); },
+    });
   }
 
   async function pay() {
     setPayError("");
     setPayNotice("");
     setPaying(true);
-    try {
-      // On relie d'abord un transaction_id à cet abonnement, AVANT de lancer le
-      // paiement — c'est ce qui permettra au webhook /api/cinetpay/notify de
-      // savoir quoi activer une fois CinetPay confirmé le paiement.
-      const transactionId = `ZK-SUB-${role}-${info.phone}-${Date.now()}`;
-      await apiSend("/api/payments/pending", "POST", { transactionId, kind: "subscription", role, phone: info.phone, amount: accessFee });
-      launchCinetPaySubscription({
-        transactionId,
-        amount: accessFee,
-        description: `Abonnement Zonako ${roleLabel === "vendeur" ? "Vendeur" : "Livreur"} (30 jours)`,
-        customer: { name: info.name, phone: info.phone },
-        onSuccess: () => {
-          setPaying(false);
-          setPayNotice("Paiement reçu — vérification en cours, ton abonnement s'activera dans quelques instants.");
-        },
-        onError: (msg) => { setPaying(false); setPayError(msg); },
-      });
-    } catch (e) {
-      setPaying(false);
-      setPayError("Erreur pendant la préparation du paiement. Réessaie.");
-    }
+    launchCinetPayPayment({
+      kind: "subscription",
+      role,
+      phone: info.phone,
+      onError: (msg) => { setPaying(false); setPayError(msg); },
+    });
   }
 
   if (!granted) {
@@ -1961,62 +1895,27 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
   const total = goodsTotal;
 
 
-  // Lance le guichet de paiement CinetPay (mobile money, carte...). À la confirmation
-  // ("ACCEPTED"), on enregistre la commande comme payée. En cas de refus/annulation,
-  // on laisse l'acheteur réessayer ou basculer sur le paiement à la livraison.
+  // Lance le paiement CinetPay pour une commande (mobile money, carte...).
+  // La commande est créée tout de suite, non payée — c'est /api/cinetpay/notify
+  // (vérifié auprès de CinetPay côté serveur) qui la marquera payée une fois
+  // confirmé. On quitte Zonako le temps du paiement, puis on revient
+  // automatiquement (voir la gestion de ?cp=... au niveau de l'app).
   async function launchCinetPayCheckout() {
     setPayError("");
-    if (!window.CinetPay) {
-      setPayError("Le module de paiement n'a pas pu se charger (vérifie ta connexion internet) — réessaie, ou choisis « paiement à la livraison ».");
-      return;
-    }
     setPayProcessing(true);
     try {
-      // La commande est créée tout de suite, non payée — c'est /api/cinetpay/notify
-      // (vérifié auprès de CinetPay côté serveur) qui la marquera payée. Si le
-      // paiement échoue, on annule automatiquement cette commande.
       const order = await placeOrder(total, 0, deliveryZone, { paymentMethod: "cinetpay" }, shippingMethod, preferredTransportCompany, buyerAddress);
       setPreferredTransportCompany("");
       setBuyerAddress("");
-      const transactionId = `ZK-${order.id}`;
-      await apiSend("/api/payments/pending", "POST", { transactionId, kind: "order", orderId: order.id, amount: total }, getPhoneToken(buyerInfo.phone));
-
-      const [firstName, ...rest] = (buyerInfo.name || "Client").trim().split(" ");
-      window.CinetPay.setConfig({
-        apikey: CINETPAY_CONFIG.apikey,
-        site_id: CINETPAY_CONFIG.site_id,
-        mode: CINETPAY_CONFIG.mode,
-        notify_url: CINETPAY_CONFIG.notify_url,
-      });
-      window.CinetPay.getCheckout({
-        transaction_id: transactionId,
-        amount: total,
-        currency: "XOF",
-        channels: "ALL",
-        description: `Commande Zonako · ${order.items.length} article${order.items.length > 1 ? "s" : ""}`,
-        customer_name: firstName,
-        customer_surname: rest.join(" ") || firstName,
-        customer_phone_number: buyerInfo.phone,
-        customer_address: deliveryZone || zone || "Côte d'Ivoire",
-        customer_city: (deliveryZone || zone || "Abidjan").split(" – ")[0],
-        customer_country: "CI",
-        customer_state: "CI",
-        customer_zip_code: "00225",
-      });
-      window.CinetPay.waitResponse((data) => {
-        setPayProcessing(false);
-        if (data.status === "ACCEPTED") {
-          setPayNotice("Paiement reçu — vérification en cours, ta commande passera « payée » dans quelques instants.");
-        } else {
+      launchCinetPayPayment({
+        kind: "order",
+        orderId: order.id,
+        phone: buyerInfo.phone,
+        onError: (msg) => {
+          setPayProcessing(false);
           cancelOrder(order.id, true);
-          setPayError("Paiement refusé ou annulé — la commande a été annulée. Tu peux réessayer, ou choisir « paiement à la livraison ».");
-        }
-      });
-      window.CinetPay.onError((data) => {
-        setPayProcessing(false);
-        cancelOrder(order.id, true);
-        setPayError("Une erreur est survenue pendant le paiement — la commande a été annulée. Réessaie dans un instant.");
-        console.error("Erreur CinetPay:", data);
+          setPayError(msg + " La commande a été annulée. Tu peux réessayer, ou choisir « paiement à la livraison ».");
+        },
       });
     } catch (e) {
       setPayProcessing(false);
@@ -5000,6 +4899,31 @@ function App() {
     })();
   }, []);
 
+  // Retour d'un paiement CinetPay (redirection complète, plus de fenêtre
+  // intégrée) — on affiche un message adapté, et si une commande a échoué,
+  // on l'annule automatiquement (comme le faisait l'ancien guichet en ligne).
+  const [paymentNotice, setPaymentNotice] = useState(null);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const cp = params.get("cp");
+    if (!cp) return;
+    const kind = params.get("kind");
+    const orderId = params.get("orderId");
+    const kindLabel = { order: "de ta commande", subscription: "de ton abonnement", wallet_topup: "de ta recharge", courier_fee: "des frais de livraison" }[kind] || "";
+    if (cp === "success") {
+      setPaymentNotice({ type: "success", message: `Paiement reçu — vérification en cours, ${kindLabel || "le traitement"} sera confirmé dans quelques instants.` });
+    } else {
+      setPaymentNotice({ type: "failed", message: `Paiement refusé ou annulé${kind === "order" ? " — la commande a été annulée" : ""}. Tu peux réessayer.` });
+      if (kind === "order" && orderId) {
+        const b = loadProfile("buyer");
+        if (b?.phone) {
+          apiSend(`/api/orders/${orderId}`, "PATCH", { status: "annulee" }, getPhoneToken(b.phone)).catch(() => {});
+        }
+      }
+    }
+    window.history.replaceState({}, "", window.location.pathname);
+  }, []);
+
   async function registerBuyer(info) {
     const next = { ...info, registered: true };
     setBuyerInfo(next);
@@ -5199,18 +5123,8 @@ function App() {
   // possible. L'argent reste bloqué chez le propriétaire jusqu'au code de
   // confirmation de livraison, qui le libère alors vers le livreur.
   async function payCourierFeeOnline(order) {
-    const transactionId = `ZK-COURIERFEE-${order.id}-${Date.now()}`;
-    await apiSend("/api/payments/pending", "POST", { transactionId, kind: "courier_fee", orderId: order.id, amount: order.deliveryFee }, getPhoneToken(buyerInfo.phone));
-    return new Promise((resolve, reject) => {
-      launchCinetPaySubscription({
-        transactionId,
-        amount: order.deliveryFee,
-        description: `Frais de livraison — commande #${order.id.slice(-6)}`,
-        customer: { name: buyerInfo.name, phone: buyerInfo.phone },
-        onSuccess: () => resolve(),
-        onError: (msg) => reject(new Error(msg)),
-      });
-    });
+    const { paymentUrl } = await apiSend("/api/cinetpay/init-payment", "POST", { kind: "courier_fee", orderId: order.id, phone: buyerInfo.phone }, getPhoneToken(buyerInfo.phone));
+    window.location.href = paymentUrl;
   }
   async function disputeOrder(orderId, phone, description, photoUrl) {
     const updated = await apiSend(`/api/orders/${orderId}/dispute`, "POST", { phone, description, photoUrl }, getPhoneToken(phone));
@@ -5224,6 +5138,12 @@ function App() {
       <style>{FONT_STYLE}</style>
       {showLegal && <LegalPage onClose={() => setShowLegal(false)} />}
       <TopBar role={role} setRole={setRole} cartCount={cart.reduce((s, i) => s + i.qty, 0)} onCartClick={() => setShowCart(true)} />
+      {paymentNotice && (
+        <div className={`px-4 py-2.5 text-center f-body text-xs flex items-center justify-center gap-2 ${paymentNotice.type === "success" ? "bg-[#2D6A4F]/15 text-[#2D6A4F]" : "bg-[#C1440E]/15 text-[#C1440E]"}`}>
+          <span>{paymentNotice.message}</span>
+          <button onClick={() => setPaymentNotice(null)} className="opacity-60 hover:opacity-100">✕</button>
+        </div>
+      )}
       {loading ? (
         <div className="text-center py-24 f-body text-sm text-[#14213D]/40">Chargement…</div>
       ) : (
@@ -5298,16 +5218,16 @@ function App() {
 
   PAIEMENT CINETPAY (achats clients + abonnements vendeur/livreur)
   -------------------------------------------------------------------
-  Avant d'aller en production, remplace apikey/site_id dans CINETPAY_CONFIG
-  (en haut de ce fichier) par tes vrais identifiants marchand CinetPay, mets
-  notify_url sur ton vrai domaine + /api/cinetpay/notify, et passe mode à
-  "PRODUCTION". La confirmation de paiement N'EST PLUS basée sur la seule
-  réponse reçue dans le navigateur (CinetPay.waitResponse) : chaque commande
-  démarre non payée, et c'est le webhook serveur /api/cinetpay/notify qui
-  interroge directement l'API CinetPay pour connaître le vrai statut avant
-  de marquer une commande "payée" — voir server.js. Ajoute aussi
-  CINETPAY_APIKEY/CINETPAY_SITE_ID comme variables d'environnement côté
-  serveur (nécessaires pour cette vérification).
+  Le paiement est maintenant entièrement initié par le SERVEUR (nouvelle API
+  CinetPay "Aurore" v1) — plus de guichet JavaScript côté client. Configure
+  CINETPAY_API_KEY et CINETPAY_API_PASSWORD comme variables d'environnement
+  côté serveur (Espace CinetPay > API & Sécurité), et CINETPAY_BASE_URL si
+  besoin (Sandbox par défaut, à remplacer par l'URL de production le moment
+  venu). La confirmation de paiement N'EST PAS basée sur la redirection du
+  navigateur : chaque commande démarre non payée, et c'est le webhook serveur
+  /api/cinetpay/notify qui interroge directement l'API CinetPay (GET
+  /v1/payment/{merchant_transaction_id}) pour connaître le vrai statut avant
+  de marquer une commande "payée" — voir server.js.
 
   VÉRIFICATION SMS DES COMPTES
   --------------------------------
