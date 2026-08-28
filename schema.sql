@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS pending_payments (
   role TEXT,                      -- 'vendor' ou 'courier' (abonnement)
   phone TEXT,
   amount NUMERIC,
+  notify_token TEXT,              -- jeton renvoyé par CinetPay à l'initialisation, pour authentifier le webhook (nouvelle API Aurore)
   status TEXT NOT NULL DEFAULT 'pending', -- pending | confirmed | failed
   created_at BIGINT NOT NULL
 );
@@ -483,3 +484,6 @@ CREATE TABLE IF NOT EXISTS price_negotiations (
 );
 CREATE INDEX IF NOT EXISTS idx_negotiations_vendor ON price_negotiations(vendor_phone, status);
 CREATE INDEX IF NOT EXISTS idx_negotiations_buyer ON price_negotiations(buyer_phone, status);
+
+-- Migration vers la nouvelle API CinetPay "Aurore" (v1) — jeton d'authenticité du webhook.
+ALTER TABLE pending_payments ADD COLUMN IF NOT EXISTS notify_token TEXT;
