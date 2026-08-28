@@ -45,12 +45,34 @@ if (!OWNER_PASSCODE) {
   console.warn("⚠️  OWNER_PASSCODE n'est pas défini dans les variables d'environnement — l'espace propriétaire sera inaccessible tant que ce n'est pas réglé.");
 }
 
-// Identifiants marchand CinetPay, nécessaires pour appeler l'API de vérification
-// de transaction (jamais pour initier un paiement — ça, c'est le rôle du frontend).
-const CINETPAY_APIKEY = process.env.CINETPAY_APIKEY || "";
-const CINETPAY_SITE_ID = process.env.CINETPAY_SITE_ID || "";
-if (!CINETPAY_APIKEY || !CINETPAY_SITE_ID) {
-  console.warn("⚠️  CINETPAY_APIKEY / CINETPAY_SITE_ID non définis — la vérification serveur des paiements ne fonctionnera pas tant que ce n'est pas réglé.");
+// Identifiants marchand CinetPay (nouvelle API "Aurore" v1) — nécessaires pour
+// s'authentifier (jeton OAuth) avant d'initier ou de vérifier un paiement.
+const CINETPAY_API_KEY = process.env.CINETPAY_API_KEY || "";
+const CINETPAY_API_PASSWORD = process.env.CINETPAY_API_PASSWORD || "";
+const CINETPAY_BASE_URL = process.env.CINETPAY_BASE_URL || "https://api.cinetpay.net"; // Sandbox actuellement — l'URL de base pourrait changer au passage en production, à reconfirmer avec CinetPay le moment venu
+if (!CINETPAY_API_KEY || !CINETPAY_API_PASSWORD) {
+  console.warn("⚠️  CINETPAY_API_KEY / CINETPAY_API_PASSWORD non définis — les paiements CinetPay ne fonctionneront pas tant que ce n'est pas réglé.");
+}
+// Le jeton d'accès CinetPay est valable 24h — on le garde en mémoire et on ne
+// se reconnecte que lorsqu'il est proche d'expirer, plutôt que de refaire un
+// login à chaque appel.
+let cinetpayTokenCache = { token: null, expiresAt: 0 };
+async function getCinetPayAccessToken() {
+  if (cinetpayTokenCache.token && Date.now() < cinetpayTokenCache.expiresAt) {
+    return cinetpayTokenCache.token;
+  }
+  const r = await fetch(`${CINETPAY_BASE_URL}/v1/oauth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ api_key: CINETPAY_API_KEY, api_password: CINETPAY_API_PASSWORD }),
+  });
+  if (!r.ok) throw new Error(`CinetPay (authentification) a répondu ${r.status}`);
+  const data = await r.json();
+  if (!data.access_token) throw new Error("CinetPay n'a pas renvoyé de jeton d'accès.");
+  // Marge de sécurité de 5 minutes avant l'expiration réelle, pour ne jamais
+  // utiliser un jeton qui expire pile pendant une requête.
+  cinetpayTokenCache = { token: data.access_token, expiresAt: Date.now() + (data.expires_in - 300) * 1000 };
+  return data.access_token;
 }
 
 // Twilio Verify (SMS OTP) — facultatif : si absent, un code de secours s'affiche
@@ -2320,40 +2342,106 @@ app.post("/api/vendors/:phone/live-announcement", requirePhone((req) => req.para
   res.json(mapContent(rows[0]));
 });
 
-// ==================== PAIEMENTS CINETPAY (vérifiés côté serveur) ====================
-// Le frontend appelle ceci juste AVANT de lancer le guichet CinetPay, pour relier
-// un transaction_id à la commande ou à l'abonnement concerné. Comme ça, quand
-// CinetPay confirme le paiement via notify_url, le serveur sait quoi valider.
-app.post("/api/payments/pending", async (req, res) => {
-  const { transactionId, kind, orderId, role, phone, amount } = req.body;
-  if (!transactionId || !kind) return res.status(400).json({ error: "transactionId et kind requis." });
-  await pool.query(
-    `INSERT INTO pending_payments (transaction_id, kind, order_id, role, phone, amount, status, created_at)
-     VALUES ($1,$2,$3,$4,$5,$6,'pending',$7)
-     ON CONFLICT (transaction_id) DO NOTHING`,
-    [transactionId, kind, orderId || null, role || null, phone || null, amount || 0, Date.now()]
-  );
-  res.json({ ok: true });
+// ==================== PAIEMENTS CINETPAY (nouvelle API "Aurore" v1) ====================
+// Contrairement à l'ancienne intégration (guichet JavaScript côté client), le
+// SERVEUR initie maintenant chaque paiement lui-même — ça permet de calculer
+// le montant à partir de données fiables (jamais celui envoyé par le
+// navigateur), puis de rediriger l'acheteur vers le lien renvoyé par CinetPay.
+app.post("/api/cinetpay/init-payment", async (req, res) => {
+  const { kind, orderId, role, phone, amount: clientAmount } = req.body;
+  if (!kind || !phone) return res.status(400).json({ error: "kind et phone requis." });
+  try {
+    // Le montant ne vient JAMAIS tel quel du navigateur pour une commande, un
+    // abonnement ou des frais de livraison — on va le rechercher nous-mêmes.
+    // Seule la recharge de portefeuille fait exception : c'est le vendeur qui
+    // choisit librement combien il veut ajouter à son propre solde.
+    let amount, designation;
+    if (kind === "order") {
+      const { rows } = await pool.query("SELECT total, payment_method, paid FROM orders WHERE id = $1", [orderId]);
+      if (!rows[0]) return res.status(404).json({ error: "Commande introuvable." });
+      if (rows[0].paid) return res.status(400).json({ error: "Cette commande est déjà payée." });
+      amount = Number(rows[0].total);
+      designation = `Commande Zonako #${orderId.slice(-6)}`;
+    } else if (kind === "subscription") {
+      if (!["vendor", "courier"].includes(role)) return res.status(400).json({ error: "Rôle invalide." });
+      const { rows } = await pool.query("SELECT access_fee FROM settings WHERE id = 1");
+      amount = Number(rows[0]?.access_fee) || 0;
+      designation = `Abonnement Zonako ${role === "vendor" ? "Vendeur" : "Livreur"} (30 jours)`;
+    } else if (kind === "wallet_topup") {
+      amount = Number(clientAmount) || 0;
+      if (amount < 500) return res.status(400).json({ error: "Le montant minimum est de 500 F." });
+      designation = "Recharge portefeuille Zonako Vendeur";
+    } else if (kind === "courier_fee") {
+      const { rows } = await pool.query("SELECT delivery_fee, courier_fee_paid FROM orders WHERE id = $1", [orderId]);
+      if (!rows[0]) return res.status(404).json({ error: "Commande introuvable." });
+      if (rows[0].courier_fee_paid) return res.status(400).json({ error: "Les frais de livraison sont déjà payés." });
+      amount = Number(rows[0].delivery_fee);
+      designation = `Frais de livraison — commande #${orderId.slice(-6)}`;
+    } else {
+      return res.status(400).json({ error: "kind invalide." });
+    }
+    if (!amount || amount <= 0) return res.status(400).json({ error: "Montant invalide." });
+
+    const merchantTransactionId = `ZK${uid()}`.slice(0, 30); // limite CinetPay : 30 caractères
+    const token = await getCinetPayAccessToken();
+    const origin = `https://${req.get("host")}`;
+    const r = await fetch(`${CINETPAY_BASE_URL}/v1/payment`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+      body: JSON.stringify({
+        currency: "XOF",
+        merchant_transaction_id: merchantTransactionId,
+        amount,
+        lang: "fr",
+        designation,
+        client_email: `${phone.replace(/[^0-9a-zA-Z]/g, "")}@zonako.ci`,
+        client_phone_number: phone,
+        client_first_name: "Client",
+        client_last_name: "Zonako",
+        success_url: `${origin}/?cp=success&kind=${kind}${orderId ? `&orderId=${orderId}` : ""}`,
+        failed_url: `${origin}/?cp=failed&kind=${kind}${orderId ? `&orderId=${orderId}` : ""}`,
+        notify_url: `${origin}/api/cinetpay/notify`,
+      }),
+    });
+    if (!r.ok) {
+      const detail = await r.text().catch(() => "");
+      throw new Error(`CinetPay (initialisation) a répondu ${r.status} : ${detail}`);
+    }
+    const data = await r.json();
+    if (!data.payment_url) throw new Error("CinetPay n'a pas renvoyé de lien de paiement.");
+
+    await pool.query(
+      `INSERT INTO pending_payments (transaction_id, kind, order_id, role, phone, amount, notify_token, status, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8)`,
+      [merchantTransactionId, kind, orderId || null, role || null, phone, amount, data.notify_token || null, Date.now()]
+    );
+    res.json({ paymentUrl: data.payment_url });
+  } catch (e) {
+    console.error("Erreur pendant l'initialisation du paiement CinetPay:", e);
+    res.status(500).json({ error: e.message || "Impossible d'initier le paiement pour l'instant." });
+  }
 });
 
 // Interroge CinetPay pour connaître le VRAI statut d'une transaction — on ne fait
 // jamais confiance au contenu du webhook lui-même (voir doc CinetPay : c'est
 // justement pour empêcher qu'un attaquant fabrique une fausse notification).
-async function cinetpayCheckTransaction(transactionId) {
-  const r = await fetch("https://api-checkout.cinetpay.com/v2/payment/check", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ transaction_id: transactionId, site_id: CINETPAY_SITE_ID, apikey: CINETPAY_APIKEY }),
+async function cinetpayCheckTransaction(merchantTransactionId) {
+  const token = await getCinetPayAccessToken();
+  const r = await fetch(`${CINETPAY_BASE_URL}/v1/payment/${merchantTransactionId}`, {
+    headers: { "Authorization": `Bearer ${token}` },
   });
   return r.json();
 }
 
-// Webhook CinetPay (notify_url). CinetPay POSTe cpm_trans_id après chaque
-// changement de statut d'une transaction — on ignore tout le reste du corps de
-// la requête et on va vérifier nous-mêmes le vrai statut auprès de CinetPay.
+// Webhook CinetPay (notify_url). CinetPay POSTe merchant_transaction_id +
+// notify_token après chaque changement de statut d'une transaction — on ne
+// fait JAMAIS confiance à ce contenu (voir doc CinetPay : n'importe qui peut
+// forger ce payload), on va vérifier nous-mêmes le vrai statut auprès de
+// CinetPay avant de valider quoi que ce soit.
+app.get("/api/cinetpay/notify", (req, res) => res.status(200).send("OK")); // sonde de santé CinetPay
 app.post("/api/cinetpay/notify", async (req, res) => {
-  const transactionId = req.body.cpm_trans_id || req.body.transaction_id;
-  if (!transactionId) return res.status(400).send("cpm_trans_id manquant");
+  const transactionId = req.body.merchant_transaction_id || req.body.transaction_id;
+  if (!transactionId) return res.status(400).send("merchant_transaction_id manquant");
   try {
     const { rows } = await pool.query("SELECT * FROM pending_payments WHERE transaction_id = $1", [transactionId]);
     const pending = rows[0];
@@ -2364,11 +2452,17 @@ app.post("/api/cinetpay/notify", async (req, res) => {
       return res.status(200).send("OK");
     }
     if (pending.status === "confirmed") return res.status(200).send("OK"); // déjà traité, on ne rejoue pas
+    // Le jeton reçu doit correspondre à celui donné par CinetPay à l'initialisation
+    // — une différence est suspecte, mais la vraie protection reste la
+    // vérification ci-dessous, jamais le contenu de cette requête entrante.
+    if (pending.notify_token && req.body.notify_token !== pending.notify_token) {
+      console.warn("Jeton de notification CinetPay invalide pour la transaction:", transactionId);
+    }
 
     const result = await cinetpayCheckTransaction(transactionId);
-    const status = result?.data?.status;
+    const status = result?.status;
 
-    if (status === "ACCEPTED") {
+    if (status === "SUCCESS") {
       if (pending.kind === "order" && pending.order_id) {
         await pool.query("UPDATE orders SET paid = true WHERE id = $1", [pending.order_id]);
       } else if (pending.kind === "subscription" && pending.role && pending.phone) {
@@ -2382,11 +2476,11 @@ app.post("/api/cinetpay/notify", async (req, res) => {
         // Money / carte via CinetPay) — l'argent arrive directement sur le
         // compte CinetPay du propriétaire de la plateforme, comme tous les
         // autres paiements du site.
-        // SÉCURITÉ : on crédite le montant confirmé par CinetPay lui-même
-        // (result.data.amount), jamais celui déclaré par le client au moment
-        // de /api/payments/pending — sinon n'importe qui pourrait gonfler son
-        // propre solde en déclarant un montant plus élevé que ce qu'il paie réellement.
-        const confirmedAmount = Number(result?.data?.amount) || 0;
+        // SÉCURITÉ : la nouvelle API CinetPay ne renvoie plus le montant dans
+        // la vérification de statut — on utilise donc le montant enregistré
+        // par NOTRE serveur au moment de l'initialisation (pending.amount),
+        // jamais une valeur qui viendrait du navigateur à ce stade.
+        const confirmedAmount = Number(pending.amount) || 0;
         await pool.query("UPDATE profiles SET wallet_balance = wallet_balance + $1 WHERE role = 'vendor' AND phone = $2", [confirmedAmount, pending.phone]);
         logAdminAction("Portefeuille rechargé par le vendeur", pending.phone, `+${confirmedAmount} F`);
       } else if (pending.kind === "courier_fee" && pending.order_id) {
@@ -2396,7 +2490,7 @@ app.post("/api/cinetpay/notify", async (req, res) => {
         await pool.query("UPDATE orders SET courier_fee_paid = true, courier_fee_payment_method = 'cinetpay' WHERE id = $1", [pending.order_id]);
       }
       await pool.query("UPDATE pending_payments SET status = 'confirmed' WHERE transaction_id = $1", [transactionId]);
-    } else {
+    } else if (status === "FAILED") {
       await pool.query("UPDATE pending_payments SET status = 'failed' WHERE transaction_id = $1", [transactionId]);
     }
     res.status(200).send("OK");
