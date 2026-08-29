@@ -66,7 +66,10 @@ async function getCinetPayAccessToken() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ api_key: CINETPAY_API_KEY, api_password: CINETPAY_API_PASSWORD }),
   });
-  if (!r.ok) throw new Error(`CinetPay (authentification) a répondu ${r.status}`);
+  if (!r.ok) {
+    const detail = await r.text().catch(() => "");
+    throw new Error(`CinetPay (authentification) a répondu ${r.status} : ${detail}`);
+  }
   const data = await r.json();
   if (!data.access_token) throw new Error("CinetPay n'a pas renvoyé de jeton d'accès.");
   // Marge de sécurité de 5 minutes avant l'expiration réelle, pour ne jamais
