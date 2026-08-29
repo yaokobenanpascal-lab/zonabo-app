@@ -2411,7 +2411,7 @@ app.post("/api/cinetpay/init-payment", async (req, res) => {
       throw new Error(`CinetPay (initialisation) a répondu ${r.status} : ${detail}`);
     }
     const data = await r.json();
-    if (!data.payment_url) throw new Error("CinetPay n'a pas renvoyé de lien de paiement.");
+    if (!data.payment_url) throw new Error(`CinetPay n'a pas renvoyé de lien de paiement. Réponse reçue : ${JSON.stringify(data)}`);
 
     await pool.query(
       `INSERT INTO pending_payments (transaction_id, kind, order_id, role, phone, amount, notify_token, status, created_at)
