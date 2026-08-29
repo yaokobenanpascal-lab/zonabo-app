@@ -2353,6 +2353,10 @@ app.post("/api/vendors/:phone/live-announcement", requirePhone((req) => req.para
 app.post("/api/cinetpay/init-payment", async (req, res) => {
   const { kind, orderId, role, phone, amount: clientAmount } = req.body;
   if (!kind || !phone) return res.status(400).json({ error: "kind et phone requis." });
+  // CinetPay limite client_phone_number à 20 caractères et refuse tout ce qui
+  // n'est pas un numéro propre — on nettoie ici les espaces/tirets qu'un
+  // utilisateur peut avoir tapés, plutôt que de faire confiance au format brut.
+  const cleanPhone = String(phone).replace(/[^0-9+]/g, "").slice(0, 20);
   try {
     // Le montant ne vient JAMAIS tel quel du navigateur pour une commande, un
     // abonnement ou des frais de livraison — on va le rechercher nous-mêmes.
@@ -2397,8 +2401,8 @@ app.post("/api/cinetpay/init-payment", async (req, res) => {
         amount,
         lang: "fr",
         designation,
-        client_email: `${phone.replace(/[^0-9a-zA-Z]/g, "")}@zonako.ci`,
-        client_phone_number: phone,
+        client_email: `${cleanPhone.replace(/[^0-9a-zA-Z]/g, "")}@zonako.ci`,
+        client_phone_number: cleanPhone,
         client_first_name: "Client",
         client_last_name: "Zonako",
         success_url: `${origin}/?cp=success&kind=${kind}${orderId ? `&orderId=${orderId}` : ""}`,
