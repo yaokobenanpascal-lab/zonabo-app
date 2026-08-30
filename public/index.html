@@ -98,9 +98,22 @@ const CLOUDINARY_CONFIG = {
 // transformations Cloudinary — gratuit, déjà inclus, aucun service en plus.
 // Insère les paramètres juste après "/upload/" dans l'URL Cloudinary. Si ce
 // n'est pas une URL Cloudinary (ex: ancien fallback base64), renvoie tel quel.
-function enhancedImageUrl(url) {
+// Optimise une image Cloudinary pour un chargement rapide : redimensionne à
+// la taille réellement affichée, compresse automatiquement (q_auto),
+// convertit au meilleur format pour le navigateur (f_auto, souvent WebP).
+// Sans ça, chaque vignette chargeait la photo originale en pleine résolution
+// (parfois plusieurs Mo), ce qui rendait le site très lent — particulièrement
+// sensible sur connexion mobile.
+function enhancedImageUrl(url, width = 500) {
   if (!url || !url.includes("/upload/")) return url;
-  return url.replace("/upload/", "/upload/e_improve,e_auto_contrast,e_sharpen:60/");
+  return url.replace("/upload/", `/upload/w_${width},q_auto,f_auto,c_limit,e_improve,e_auto_contrast,e_sharpen:60/`);
+}
+// Version légère (sans les effets d'amélioration) pour les petites vignettes
+// d'interface (aperçus dans les formulaires, historiques...) — juste le
+// redimensionnement/compression, pour rester rapide sans traitement inutile.
+function thumbUrl(url, width = 120) {
+  if (!url || !url.includes("/upload/")) return url;
+  return url.replace("/upload/", `/upload/w_${width},q_auto,f_auto,c_limit/`);
 }
 async function uploadImageToCloudinary(file) {
   if (CLOUDINARY_CONFIG.cloudName.startsWith("REMPLACE")) {
@@ -526,7 +539,7 @@ function VendorBoutiqueView({ vendorPhone, products, onClose, onOpenProduct }) {
                   {p.videoUrl ? (
                     <video src={p.videoUrl} autoPlay muted loop playsInline className="w-full h-full object-cover" />
                   ) : p.imageUrl ? (
-                    <img src={enhancedImageUrl(p.imageUrl)} alt={p.name} className="w-full h-full object-cover" />
+                    <img src={enhancedImageUrl(p.imageUrl, 400)} alt={p.name} loading="lazy" className="w-full h-full object-cover" />
                   ) : null}
                   {p.negotiable && <span className="absolute top-1.5 left-1.5 f-mono text-[9px] bg-[#14213D]/80 text-white px-1.5 py-0.5 rounded-full">💬</span>}
                 </div>
@@ -574,7 +587,7 @@ function ProductGalleryModal({ product, onClose, buyerPhone, addToCart }) {
         {current.type === "video" ? (
           <video src={current.url} controls autoPlay className="w-full max-h-[70vh] rounded-xl bg-black" />
         ) : (
-          <img src={current.type === "image" ? enhancedImageUrl(current.url) : current.url} alt={product.name} className="w-full max-h-[70vh] object-contain rounded-xl" />
+          <img src={current.type === "image" ? enhancedImageUrl(current.url, 900) : current.url} alt={product.name} loading="lazy" className="w-full max-h-[70vh] object-contain rounded-xl" />
         )}
         {current.type === "buyer_image" && (
           <span className="absolute top-2 left-2 f-mono text-[10px] bg-[#2D6A4F] text-white px-2 py-1 rounded-full">✓ Photo d'un acheteur réel</span>
@@ -847,7 +860,7 @@ function DisputeOrConfirm({ orderId, buyerPhone, confirmLabel, onConfirm, onDisp
       <div className="mt-1.5 space-y-1.5">
         <textarea placeholder="Décris le problème (taille, couleur, modèle différent de l'annonce...)" value={description} onChange={(e) => setDescription(e.target.value)} rows={2} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 text-xs" />
         {photoUrl ? (
-          <img src={photoUrl} alt="" className="w-20 h-20 rounded-lg object-cover border-2 border-[#14213D]/10" />
+          <img src={thumbUrl(photoUrl, 150)} alt="" loading="lazy" className="w-20 h-20 rounded-lg object-cover border-2 border-[#14213D]/10" />
         ) : (
           <label className="f-mono text-[10px] text-center bg-[#14213D]/5 text-[#14213D]/60 py-1.5 rounded-lg cursor-pointer block">
             {uploading ? "Envoi…" : "📷 Ajouter une photo de l'article reçu (recommandé)"}
@@ -2022,7 +2035,7 @@ function BuyerView({ products, zone, setZone, cart, setCart, buyerInfo, register
                     {p.videoUrl ? (
                       <video src={p.videoUrl} autoPlay muted loop playsInline className="w-full h-full object-cover" />
                     ) : p.imageUrl ? (
-                      <img src={enhancedImageUrl(p.imageUrl)} alt={p.name} className="zonako-kenburns w-full h-full object-cover" onError={(e) => { e.target.style.display = "none"; e.target.parentElement.textContent = cat?.emoji || "📦"; }} />
+                      <img src={enhancedImageUrl(p.imageUrl, 400)} alt={p.name} loading="lazy" className="zonako-kenburns w-full h-full object-cover" onError={(e) => { e.target.style.display = "none"; e.target.parentElement.textContent = cat?.emoji || "📦"; }} />
                     ) : (cat?.emoji || "📦")}
                     {p.imageUrls && p.imageUrls.length > 1 && (
                       <span className="absolute bottom-1.5 right-1.5 f-mono text-[9px] bg-black/60 text-white px-1.5 py-0.5 rounded-full">📷 {p.imageUrls.length}</span>
@@ -2466,6 +2479,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
   const [mannequinPose, setMannequinPose] = useState("Trois-quarts");
   const [mannequinStyle, setMannequinStyle] = useState("Studio épuré");
   const [mannequinCustom, setMannequinCustom] = useState("");
+  const [ensembleLabels, setEnsembleLabels] = useState({}); // { [photoUrl]: "pantalon" }
   const [mannequinError, setMannequinError] = useState("");
   const [certifiedAccurate, setCertifiedAccurate] = useState(false);
   const [uploadingImg, setUploadingImg] = useState(false);
@@ -2625,7 +2639,8 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
       const realPhotos = form.imageUrls.filter((u) => !form.aiPhotoUrls.includes(u));
       const isEnsemble = displayType === "Ensemble complet (plusieurs articles)";
       const refUrls = isEnsemble ? realPhotos.slice(0, 3) : [realPhotos[0]];
-      const { imageUrl } = await apiSend("/api/products/generate-mannequin-photo", "POST", { vendorPhone: vendorInfo.phone, imageUrl: refUrls[0], imageUrls: refUrls, displayType, pose: mannequinPose, style: mannequinStyle, customInstructions: mannequinCustom }, getPhoneToken(vendorInfo.phone));
+      const itemLabels = isEnsemble ? refUrls.map((u) => (ensembleLabels[u] || "").trim()) : [];
+      const { imageUrl } = await apiSend("/api/products/generate-mannequin-photo", "POST", { vendorPhone: vendorInfo.phone, imageUrl: refUrls[0], imageUrls: refUrls, itemLabels, displayType, pose: mannequinPose, style: mannequinStyle, customInstructions: mannequinCustom }, getPhoneToken(vendorInfo.phone));
       // La photo générée passe en premier (couverture) — c'est elle que
       // l'acheteur voit en premier, avant les photos brutes du vendeur.
       // On la marque aussi comme "générée par IA" pour le badge acheteur et
@@ -2951,7 +2966,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                 <div className="flex gap-1.5 mb-2 flex-wrap">
                   {form.imageUrls.map((url, i) => (
                     <div key={i} className="relative">
-                      <img src={url} alt="" className="w-14 h-14 rounded-lg object-cover border-2 border-[#14213D]/10" />
+                      <img src={thumbUrl(url, 150)} alt="" loading="lazy" className="w-14 h-14 rounded-lg object-cover border-2 border-[#14213D]/10" />
                       {i === 0 && <span className="absolute -top-1.5 -left-1.5 f-mono text-[8px] bg-[#2D6A4F] text-white px-1 rounded">Couv.</span>}
                       <button onClick={() => removeImage("new", i)} className="absolute -top-1.5 -right-1.5 bg-white rounded-full border border-[#14213D]/10"><X size={12} className="text-[#C1440E]" /></button>
                     </div>
@@ -3009,6 +3024,21 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                       <option>Extérieur lifestyle</option>
                       <option>Ambiance colorée</option>
                     </select>
+                  )}
+                  {displayType === "Ensemble complet (plusieurs articles)" && form.imageUrls.filter((u) => !form.aiPhotoUrls.includes(u)).length > 1 && (
+                    <div className="mb-1.5 space-y-1">
+                      <p className="f-body text-[9px] text-[#14213D]/50">Décris chaque photo (aide l'IA à toutes les inclure, ex: "pantalon", "polo", "casquette") :</p>
+                      {form.imageUrls.filter((u) => !form.aiPhotoUrls.includes(u)).slice(0, 3).map((url, i) => (
+                        <input
+                          key={url}
+                          value={ensembleLabels[url] || ""}
+                          onChange={(e) => setEnsembleLabels((prev) => ({ ...prev, [url]: e.target.value }))}
+                          maxLength={40}
+                          placeholder={`Article ${i + 1} (photo ${i + 1})…`}
+                          className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-xs"
+                        />
+                      ))}
+                    </div>
                   )}
                   <input
                     value={mannequinCustom}
@@ -3137,7 +3167,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                   <div className="space-y-2">
                     <p className="f-body text-sm font-medium text-[#14213D]">{p.name}</p>
                     <div className="flex items-center gap-2">
-                      {editForm.imageUrl && <img src={editForm.imageUrl} alt="" className="w-9 h-9 rounded-lg object-cover border-2 border-[#14213D]/10" />}
+                      {editForm.imageUrl && <img src={thumbUrl(editForm.imageUrl, 100)} alt="" loading="lazy" className="w-9 h-9 rounded-lg object-cover border-2 border-[#14213D]/10" />}
                       <label className="flex-1 f-mono text-[10px] text-center bg-[#14213D]/5 hover:bg-[#14213D]/10 text-[#14213D]/60 py-1.5 rounded-lg cursor-pointer">
                         {uploadingEditImg ? "Compression…" : "Changer la photo"}
                         <input type="file" accept="image/*" className="hidden" onChange={(e) => handleImageUpload(e.target.files[0], "edit")} />
@@ -3158,7 +3188,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                       <div className="flex gap-1.5 mb-1.5 flex-wrap">
                         {(editForm.imageUrls || []).map((url, i) => (
                           <div key={i} className="relative">
-                            <img src={url} alt="" className="w-10 h-10 rounded-lg object-cover border-2 border-[#14213D]/10" />
+                            <img src={thumbUrl(url, 100)} alt="" loading="lazy" className="w-10 h-10 rounded-lg object-cover border-2 border-[#14213D]/10" />
                             <button onClick={() => removeImage("edit", i)} className="absolute -top-1.5 -right-1.5 bg-white rounded-full border border-[#14213D]/10"><X size={10} className="text-[#C1440E]" /></button>
                           </div>
                         ))}
@@ -3195,7 +3225,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                 ) : (
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      {p.imageUrl && <img src={p.imageUrl} alt="" className="w-10 h-10 rounded-lg object-cover border-2 border-[#14213D]/10" />}
+                      {p.imageUrl && <img src={thumbUrl(p.imageUrl, 100)} alt="" loading="lazy" className="w-10 h-10 rounded-lg object-cover border-2 border-[#14213D]/10" />}
                       <div>
                         <p className="f-body text-sm font-medium text-[#14213D]">{p.name}</p>
                         <p className="f-mono text-xs text-[#14213D]/40">{p.price.toLocaleString("fr-FR")} F · stock {p.stock} · {zoneLabel(p.zone)}</p>
@@ -4621,7 +4651,7 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
               <div key={d.id} className="border-2 border-[#C1440E]/20 rounded-xl p-3">
                 <p className="f-mono text-[10px] text-[#14213D]/50">Commande #{d.orderId.slice(-6)} · Vendeur : {d.vendorPhone || "—"} · Acheteur : {d.buyerPhone}</p>
                 {d.description && <p className="f-body text-xs text-[#14213D] mt-1.5">"{d.description}"</p>}
-                {d.photoUrl && <img src={d.photoUrl} alt="Article reçu" className="w-32 h-32 rounded-lg object-cover border-2 border-[#14213D]/10 mt-2" />}
+                {d.photoUrl && <img src={thumbUrl(d.photoUrl, 250)} alt="Article reçu" loading="lazy" className="w-32 h-32 rounded-lg object-cover border-2 border-[#14213D]/10 mt-2" />}
                 <div className="flex gap-2 mt-2">
                   <button disabled={disputesBusy === d.id} onClick={() => resolveDispute(d.id, "buyer")} className="flex-1 f-mono text-[10px] bg-[#C1440E] disabled:opacity-40 text-white py-1.5 rounded-full">
                     En faveur de l'acheteur (rembourser)
