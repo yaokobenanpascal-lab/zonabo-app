@@ -773,7 +773,7 @@ app.post("/api/products/generate-description", requirePhone((req) => req.body.ve
 // contrairement aux autres intégrations (Cloudinary, Anthropic) déjà vérifiées.
 app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.body.vendorPhone), async (req, res) => {
   if (!RUNWAY_API_KEY) return res.status(500).json({ error: "La génération de photo mannequin n'est pas encore configurée sur le serveur." });
-  const { imageUrl, imageUrls, displayType, pose, style, customInstructions } = req.body;
+  const { imageUrl, imageUrls, itemLabels, displayType, pose, style, customInstructions } = req.body;
   if (!imageUrl) return res.status(400).json({ error: "Choisis d'abord une photo de l'article." });
   // Pour un ensemble complet (plusieurs articles vendus comme un seul
   // produit), on peut fournir jusqu'à 5 photos de référence — une par
@@ -783,7 +783,6 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
   // Runway limite à 3 photos de référence maximum par génération (au-delà,
   // il renvoie une erreur de validation) — confirmé par un test réel.
   const refUrls = Array.isArray(imageUrls) && imageUrls.length ? imageUrls.slice(0, 3) : [imageUrl];
-  try {
     // Chaque type de produit demande une mise en scène différente — un
     // mannequin torse ne convient qu'aux vêtements, pas à une montre ou des
     // bijoux, qui ont besoin de leur propre présentation.
@@ -815,8 +814,16 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
     // montrés sur la photo de référence doivent apparaître ensemble, quel que
     // soit leur type (vêtement, chaussures, montre, sac, bijoux...). Jusqu'à
     // 5 photos séparées (une par article) peuvent être fournies en référence.
+    // Le vendeur peut décrire chaque photo (ex: "pantalon", "polo",
+    // "casquette") — sans ça, l'IA a tendance à privilégier une seule photo
+    // et ignorer les autres ; avec des étiquettes précises, elle sait
+    // explicitement combien d'articles distincts doivent apparaître.
+    const cleanLabels = (Array.isArray(itemLabels) ? itemLabels : []).map((l) => String(l || "").trim()).filter(Boolean);
+    const refNote = cleanLabels.length
+      ? ` Reference photos: ${cleanLabels.map((l, i) => `#${i + 1}=${l}`).join(", ")}. Include EVERY one of these items, each exactly matching its own photo — never skip, invent, or restyle any.`
+      : " Use every reference photo provided, each item exactly as shown — do not skip, invent, or restyle any.";
     const ENSEMBLE =
-      `A white plastic full-body display mannequin (head to toe) wearing every item from ALL reference photos together as one matching outfit — accessories (shoes, watch, bag, jewelry, hat) placed naturally, all visible at once, ${poseText}, ${STUDIO_BASE}`;
+      `A white plastic full-body display mannequin (head to toe) wearing every item from ALL reference photos together as one matching outfit — accessories (shoes, watch, bag, jewelry, hat) placed naturally, all visible at once, ${poseText}, ${STUDIO_BASE}${refNote}`;
     const PROMPTS = {
       "Vêtement femme": FULL_BODY_CLOTHING("female"),
       "Vêtement homme": FULL_BODY_CLOTHING("male"),
@@ -846,7 +853,12 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
     const finalPromptText = rawExtra && budget > 15
       ? `${promptText}${prefix}${rawExtra.slice(0, budget)}.`
       : promptText;
-    const createResp = await fetch("https://api.dev.runwayml.com/v1/text_to_image", {
+
+    // Génère une image et la rend permanente — regroupé dans une fonction
+    // pour pouvoir la relancer si la vérification ci-dessous détecte qu'un
+    // article manque (cas "Ensemble complet" avec étiquettes).
+    async function generateOnce() {
+      const createResp = await fetch("https://api.dev.runwayml.com/v1/text_to_image", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -882,7 +894,58 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
       if (poll.status === "FAILED") throw new Error(poll.failure || "La génération Runway a échoué.");
     }
     if (!output) throw new Error("La génération prend plus de temps que prévu — réessaie dans un instant.");
-    const permanentUrl = await reuploadToCloudinary(output);
+    return await reuploadToCloudinary(output);
+  }
+
+  // Vérifie par IA (vision) que TOUS les articles étiquetés apparaissent bien
+  // sur l'image générée — utile seulement pour "Ensemble complet" avec des
+  // étiquettes renseignées, seul cas où on sait précisément quoi vérifier.
+  // En cas de doute ou d'erreur technique, on ne bloque jamais le vendeur :
+  // mieux vaut lui laisser une image imparfaite qu'aucune image du tout.
+  async function verifyAllItemsPresent(imageUrl, labels) {
+    if (!ANTHROPIC_API_KEY) return true;
+    try {
+      const imgResp = await fetch(imageUrl);
+      const buf = Buffer.from(await imgResp.arrayBuffer());
+      const base64 = buf.toString("base64");
+      const mediaType = imgResp.headers.get("content-type") || "image/png";
+      const r = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 50,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
+              { type: "text", text: `Cette image montre-t-elle clairement TOUS ces articles, portés/affichés sur le mannequin : ${labels.join(", ")} ? Réponds STRICTEMENT en JSON, rien d'autre, format exact : {"complet": true} ou {"complet": false}` },
+            ],
+          }],
+        }),
+      });
+      if (!r.ok) return true;
+      const data = await r.json();
+      const raw = (data.content || []).map((b) => b.text || "").join("").trim().replace(/```json|```/g, "").trim();
+      return !!JSON.parse(raw).complet;
+    } catch {
+      return true;
+    }
+  }
+
+  try {
+    let permanentUrl = await generateOnce();
+    // On ne relance que si des étiquettes précises ont été données — sans
+    // ça, on ne saurait pas quoi vérifier. Jusqu'à 2 tentatives
+    // supplémentaires (3 au total) : au-delà, on garde le dernier résultat
+    // plutôt que de multiplier les coûts Runway indéfiniment.
+    if (cleanLabels.length > 1) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const ok = await verifyAllItemsPresent(permanentUrl, cleanLabels);
+        if (ok) break;
+        permanentUrl = await generateOnce();
+      }
+    }
     res.json({ imageUrl: permanentUrl });
   } catch (e) {
     console.error("Erreur pendant la génération de photo mannequin (Runway):", e);
