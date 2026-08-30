@@ -903,7 +903,7 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
   // En cas de doute ou d'erreur technique, on ne bloque jamais le vendeur :
   // mieux vaut lui laisser une image imparfaite qu'aucune image du tout.
   async function verifyAllItemsPresent(imageUrl, labels) {
-    if (!ANTHROPIC_API_KEY) return true;
+    if (!ANTHROPIC_API_KEY) { console.warn("Vérification ensemble ignorée : ANTHROPIC_API_KEY absente."); return true; }
     try {
       const imgResp = await fetch(imageUrl);
       const buf = Buffer.from(await imgResp.arrayBuffer());
@@ -924,11 +924,18 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
           }],
         }),
       });
-      if (!r.ok) return true;
+      if (!r.ok) {
+        const detail = await r.text().catch(() => "");
+        console.error(`Vérification ensemble : Anthropic a répondu ${r.status} : ${detail}`);
+        return true;
+      }
       const data = await r.json();
       const raw = (data.content || []).map((b) => b.text || "").join("").trim().replace(/```json|```/g, "").trim();
-      return !!JSON.parse(raw).complet;
-    } catch {
+      const verdict = !!JSON.parse(raw).complet;
+      console.log(`Vérification ensemble [${labels.join(", ")}] → ${verdict ? "complet" : "incomplet, nouvelle tentative"}`);
+      return verdict;
+    } catch (e) {
+      console.error("Vérification ensemble : erreur inattendue —", e.message);
       return true;
     }
   }
