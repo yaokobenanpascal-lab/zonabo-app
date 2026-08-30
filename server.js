@@ -787,14 +787,14 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
     // Chaque type de produit demande une mise en scène différente — un
     // mannequin torse ne convient qu'aux vêtements, pas à une montre ou des
     // bijoux, qui ont besoin de leur propre présentation.
-    const FIDELITY = "CRITICAL: this must be the EXACT same item(s) as in the reference photo — do not alter, reinterpret, or invent colors, shapes, patterns, prints, textures or materials in any way. Only change the setting/framing/presentation around it, never the item itself.";
+    const FIDELITY = "CRITICAL: keep the EXACT same item(s) as the reference photo — same colors, shapes, patterns, materials. Only change the setting/framing, never the item.";
     // Choix du style/décor général — applicable à la plupart des catégories,
     // pour donner un vrai choix de mise en scène plutôt qu'un seul rendu fixe.
     const STYLES = {
-      "Studio épuré": `shot in a minimal e-commerce studio setting, pure white seamless background, soft diffused front lighting with subtle fill from both sides, no shadows, clean product photography aesthetic, no extra props. ${FIDELITY}`,
-      "Boutique chic": `shot inside an upscale boutique retail interior, warm ambient ceiling spotlights, softly blurred wooden shelving and premium display fixtures in the background, elegant retail photography aesthetic. ${FIDELITY}`,
-      "Extérieur lifestyle": `shot outdoors in soft natural daylight, a softly blurred greenery or warm urban backdrop, relaxed authentic lifestyle product photography look. ${FIDELITY}`,
-      "Ambiance colorée": `shot against a bold solid-color studio backdrop (deep navy blue or warm gold tone), dramatic directional studio lighting, striking modern premium product photography look. ${FIDELITY}`,
+      "Studio épuré": `minimal e-commerce studio, pure white seamless background, soft diffused lighting, no shadows, clean product photography. ${FIDELITY}`,
+      "Boutique chic": `upscale boutique retail interior, warm ambient spotlights, softly blurred wooden shelving, elegant retail photography look. ${FIDELITY}`,
+      "Extérieur lifestyle": `outdoors in soft natural daylight, softly blurred greenery or warm urban backdrop, authentic lifestyle photography look. ${FIDELITY}`,
+      "Ambiance colorée": `bold solid-color studio backdrop (deep navy or warm gold), dramatic directional lighting, striking modern product photography. ${FIDELITY}`,
     };
     const STUDIO_BASE = STYLES[style] || STYLES["Studio épuré"];
     const POSES = {
@@ -816,7 +816,7 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
     // soit leur type (vêtement, chaussures, montre, sac, bijoux...). Jusqu'à
     // 5 photos séparées (une par article) peuvent être fournies en référence.
     const ENSEMBLE =
-      `A white plastic full-body display mannequin (head to toe, including a head form) wearing and displaying every single item shown across ALL the reference photos together, as one complete matching set from a single outfit — clothing worn naturally on the mannequin body, and any accessories (shoes, watch, bag, jewelry, hat, or similar) placed or worn exactly where they would naturally go, all items combined and visible at once on the same mannequin, ${poseText}, ${STUDIO_BASE}`;
+      `A white plastic full-body display mannequin (head to toe) wearing every item from ALL reference photos together as one matching outfit — accessories (shoes, watch, bag, jewelry, hat) placed naturally, all visible at once, ${poseText}, ${STUDIO_BASE}`;
     const PROMPTS = {
       "Vêtement femme": FULL_BODY_CLOTHING("female"),
       "Vêtement homme": FULL_BODY_CLOTHING("male"),
@@ -836,12 +836,15 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
     };
     const promptText = PROMPTS[displayType] || PROMPTS["Vêtement femme"];
     // Le vendeur peut ajouter ses propres précisions libres (ex: "mannequin
-    // souriant, fond bleu ciel, éclairage doré") — on les ajoute à la fin du
-    // prompt, comme des précisions d'ambiance en plus, jamais à la place de
-    // la contrainte de fidélité à l'article réel (déjà incluse plus haut).
-    const extra = String(customInstructions || "").trim().slice(0, 300);
-    const finalPromptText = extra
-      ? `${promptText} Additional styling preferences from the seller: ${extra}. These seller preferences take priority over the pose/position described above if they conflict — but never change the item itself, which must always stay exactly as shown in the reference photo.`
+    // souriant, fond bleu ciel, éclairage doré") — Runway limite tout
+    // promptText à 1000 caractères, donc on calcule ici la place qu'il reste
+    // réellement après le texte de base, plutôt qu'une limite fixe qui
+    // dépasserait selon la catégorie/style choisis.
+    const rawExtra = String(customInstructions || "").trim();
+    const prefix = " Seller note (priority over pose above; never change the item): ";
+    const budget = 1000 - promptText.length - prefix.length - 1; // -1 pour le point final
+    const finalPromptText = rawExtra && budget > 15
+      ? `${promptText}${prefix}${rawExtra.slice(0, budget)}.`
       : promptText;
     const createResp = await fetch("https://api.dev.runwayml.com/v1/text_to_image", {
       method: "POST",
