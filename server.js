@@ -773,7 +773,7 @@ app.post("/api/products/generate-description", requirePhone((req) => req.body.ve
 // contrairement aux autres intégrations (Cloudinary, Anthropic) déjà vérifiées.
 app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.body.vendorPhone), async (req, res) => {
   if (!RUNWAY_API_KEY) return res.status(500).json({ error: "La génération de photo mannequin n'est pas encore configurée sur le serveur." });
-  const { imageUrl, imageUrls, displayType, pose, style } = req.body;
+  const { imageUrl, imageUrls, displayType, pose, style, customInstructions } = req.body;
   if (!imageUrl) return res.status(400).json({ error: "Choisis d'abord une photo de l'article." });
   // Pour un ensemble complet (plusieurs articles vendus comme un seul
   // produit), on peut fournir jusqu'à 5 photos de référence — une par
@@ -835,6 +835,14 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
       "Véhicule / Engin": `This exact vehicle or machine (car, motorcycle, bicycle, or similar) displayed in a professional automotive showroom setting, clean reflective floor, dramatic professional dealership-style lighting, three-quarter angle that highlights its shape and condition, no people, no mannequin. CRITICAL: this must be the EXACT same vehicle as in the reference photo — do not alter, reinterpret, or invent its color, model, shape, condition or details in any way. Only change the setting/lighting/framing around it, never the vehicle itself.`,
     };
     const promptText = PROMPTS[displayType] || PROMPTS["Vêtement femme"];
+    // Le vendeur peut ajouter ses propres précisions libres (ex: "mannequin
+    // souriant, fond bleu ciel, éclairage doré") — on les ajoute à la fin du
+    // prompt, comme des précisions d'ambiance en plus, jamais à la place de
+    // la contrainte de fidélité à l'article réel (déjà incluse plus haut).
+    const extra = String(customInstructions || "").trim().slice(0, 300);
+    const finalPromptText = extra
+      ? `${promptText} Additional styling preferences from the seller: ${extra}. These seller preferences take priority over the pose/position described above if they conflict — but never change the item itself, which must always stay exactly as shown in the reference photo.`
+      : promptText;
     const createResp = await fetch("https://api.dev.runwayml.com/v1/text_to_image", {
       method: "POST",
       headers: {
@@ -844,7 +852,7 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
       },
       body: JSON.stringify({
         model: "gen4_image",
-        promptText,
+        promptText: finalPromptText,
         referenceImages: refUrls.map((uri) => ({ uri })),
         ratio: "1024:1024",
       }),
