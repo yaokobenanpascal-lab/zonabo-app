@@ -897,61 +897,65 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
     return await reuploadToCloudinary(output);
   }
 
-  // Vérifie par IA (vision) que TOUS les articles étiquetés apparaissent bien
-  // sur l'image générée — utile seulement pour "Ensemble complet" avec des
-  // étiquettes renseignées, seul cas où on sait précisément quoi vérifier.
+  // Vérifie par IA (vision) que le résultat généré respecte vraiment les
+  // photos de référence — présence de chaque article ET fidélité (couleur,
+  // forme, taille), en comparant directement l'image générée aux photos
+  // originales plutôt que de deviner sur la seule base de mots-clés.
+  // Appliqué à CHAQUE génération (pas seulement les ensembles à plusieurs
+  // articles) — un article seul peut aussi être mal reproduit par l'IA.
   // En cas de doute ou d'erreur technique, on ne bloque jamais le vendeur :
   // mieux vaut lui laisser une image imparfaite qu'aucune image du tout.
-  async function verifyAllItemsPresent(imageUrl, labels) {
-    if (!ANTHROPIC_API_KEY) { console.warn("Vérification ensemble ignorée : ANTHROPIC_API_KEY absente."); return true; }
+  async function verifyMannequinResult(generatedUrl, refPhotoUrls, labels) {
+    if (!ANTHROPIC_API_KEY) { console.warn("Vérification mannequin ignorée : ANTHROPIC_API_KEY absente."); return true; }
     try {
-      const imgResp = await fetch(imageUrl);
-      const buf = Buffer.from(await imgResp.arrayBuffer());
-      const base64 = buf.toString("base64");
-      const mediaType = imgResp.headers.get("content-type") || "image/png";
+      const toBase64 = async (url) => {
+        const resp = await fetch(url);
+        const buf = Buffer.from(await resp.arrayBuffer());
+        return { media_type: resp.headers.get("content-type") || "image/png", data: buf.toString("base64") };
+      };
+      const generated = await toBase64(generatedUrl);
+      const refs = await Promise.all(refPhotoUrls.map(toBase64));
+      // Si le vendeur n'a pas nommé les articles (cas d'un seul article, ou
+      // ensemble sans étiquettes), on utilise une description générique par
+      // position, sur laquelle l'IA peut quand même comparer photo par photo.
+      const namedLabels = labels.length === refPhotoUrls.length ? labels : refPhotoUrls.map((_, i) => refPhotoUrls.length > 1 ? `article ${i + 1}` : "l'article");
+      const refList = namedLabels.map((l, i) => `Photo de référence ${i + 2} = ${l}`).join(". ");
+      const content = [
+        { type: "image", source: { type: "base64", media_type: generated.media_type, data: generated.data } },
+        ...refs.map((r) => ({ type: "image", source: { type: "base64", media_type: r.media_type, data: r.data } })),
+        { type: "text", text: `La première image est une photo générée par IA pour une boutique en ligne. Les images suivantes sont les vraies photos de référence des articles réels : ${refList}. Est-ce que la première image montre CHACUN de ces articles, avec exactement la même couleur, forme et taille que sur sa photo de référence (aucun article oublié, inventé, ou dont l'apparence a changé) ? Réponds STRICTEMENT en JSON, rien d'autre, format exact : {"ok": true} ou {"ok": false}` },
+      ];
       const r = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
-        body: JSON.stringify({
-          model: "claude-haiku-4-5-20251001",
-          max_tokens: 50,
-          messages: [{
-            role: "user",
-            content: [
-              { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
-              { type: "text", text: `Cette image montre-t-elle clairement TOUS ces articles, portés/affichés sur le mannequin : ${labels.join(", ")} ? Réponds STRICTEMENT en JSON, rien d'autre, format exact : {"complet": true} ou {"complet": false}` },
-            ],
-          }],
-        }),
+        body: JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens: 50, messages: [{ role: "user", content }] }),
       });
       if (!r.ok) {
         const detail = await r.text().catch(() => "");
-        console.error(`Vérification ensemble : Anthropic a répondu ${r.status} : ${detail}`);
+        console.error(`Vérification mannequin : Anthropic a répondu ${r.status} : ${detail}`);
         return true;
       }
       const data = await r.json();
       const raw = (data.content || []).map((b) => b.text || "").join("").trim().replace(/```json|```/g, "").trim();
-      const verdict = !!JSON.parse(raw).complet;
-      console.log(`Vérification ensemble [${labels.join(", ")}] → ${verdict ? "complet" : "incomplet, nouvelle tentative"}`);
+      const verdict = !!JSON.parse(raw).ok;
+      console.log(`Vérification mannequin [${namedLabels.join(", ")}] → ${verdict ? "conforme" : "non conforme, nouvelle tentative"}`);
       return verdict;
     } catch (e) {
-      console.error("Vérification ensemble : erreur inattendue —", e.message);
+      console.error("Vérification mannequin : erreur inattendue —", e.message);
       return true;
     }
   }
 
   try {
     let permanentUrl = await generateOnce();
-    // On ne relance que si des étiquettes précises ont été données — sans
-    // ça, on ne saurait pas quoi vérifier. Jusqu'à 2 tentatives
-    // supplémentaires (3 au total) : au-delà, on garde le dernier résultat
+    // Jusqu'à 2 tentatives supplémentaires (3 au total) si la vérification
+    // détecte un article manquant, inventé, ou dont l'apparence ne
+    // correspond pas à sa photo — au-delà, on garde le dernier résultat
     // plutôt que de multiplier les coûts Runway indéfiniment.
-    if (cleanLabels.length > 1) {
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const ok = await verifyAllItemsPresent(permanentUrl, cleanLabels);
-        if (ok) break;
-        permanentUrl = await generateOnce();
-      }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const ok = await verifyMannequinResult(permanentUrl, refUrls, cleanLabels);
+      if (ok) break;
+      permanentUrl = await generateOnce();
     }
     res.json({ imageUrl: permanentUrl });
   } catch (e) {
