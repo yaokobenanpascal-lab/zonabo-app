@@ -287,6 +287,7 @@ CREATE TABLE IF NOT EXISTS withdrawal_requests (
 );
 -- Retrait d'un agent de recrutement (commissions de parrainage gagnées).
 ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS agent_phone TEXT;
+ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS vendor_phone TEXT;
 
 -- Vidéo de présentation d'un produit/boutique (marketing) — nécessite Cloudinary
 -- configuré côté vendeur (les vidéos ne peuvent pas être stockées en base64
