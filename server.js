@@ -2451,9 +2451,15 @@ app.post("/api/cinetpay/init-payment", async (req, res) => {
   const { kind, orderId, role, phone, amount: clientAmount } = req.body;
   if (!kind || !phone) return res.status(400).json({ error: "kind et phone requis." });
   // CinetPay limite client_phone_number à 20 caractères et refuse tout ce qui
-  // n'est pas un numéro propre — on nettoie ici les espaces/tirets qu'un
-  // utilisateur peut avoir tapés, plutôt que de faire confiance au format brut.
-  const cleanPhone = String(phone).replace(/[^0-9+]/g, "").slice(0, 20);
+  // n'est pas un numéro propre. Zonako accepte aussi une connexion par email
+  // (le champ "phone" contient alors une adresse email, pas un numéro) — dans
+  // ce cas, on utilise la vraie adresse email et on n'envoie simplement pas
+  // de numéro de téléphone (champ facultatif selon la doc CinetPay), plutôt
+  // que de "nettoyer" l'email et obtenir un résultat vide ou invalide.
+  const identifier = String(phone).trim();
+  const isEmailIdentifier = identifier.includes("@");
+  const cleanPhone = isEmailIdentifier ? "" : identifier.replace(/[^0-9+]/g, "").slice(0, 20);
+  const clientEmail = isEmailIdentifier ? identifier : `${cleanPhone.replace(/[^0-9a-zA-Z]/g, "")}@zonako.ci`;
   try {
     // Le montant ne vient JAMAIS tel quel du navigateur pour une commande, un
     // abonnement ou des frais de livraison — on va le rechercher nous-mêmes.
@@ -2498,8 +2504,8 @@ app.post("/api/cinetpay/init-payment", async (req, res) => {
         amount,
         lang: "fr",
         designation,
-        client_email: `${cleanPhone.replace(/[^0-9a-zA-Z]/g, "")}@zonako.ci`,
-        client_phone_number: cleanPhone,
+        client_email: clientEmail,
+        ...(cleanPhone ? { client_phone_number: cleanPhone } : {}),
         client_first_name: "Client",
         client_last_name: "Zonako",
         success_url: `${origin}/?cp=success&kind=${kind}${orderId ? `&orderId=${orderId}` : ""}`,
