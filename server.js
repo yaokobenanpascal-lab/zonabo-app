@@ -7,7 +7,8 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const { Pool } = require("pg");
-const { ProxyAgent } = require("undici");
+const nodeFetch = require("node-fetch");
+const { HttpsProxyAgent } = require("https-proxy-agent");
 
 const app = express();
 // Nécessaire derrière le proxy de Render pour que req.ip renvoie la vraie
@@ -59,7 +60,7 @@ if (!CINETPAY_API_KEY || !CINETPAY_API_PASSWORD) {
 // adresse IP fixe via un petit serveur relais (proxy) — si FIXIE_URL est
 // configuré, tous les appels vers CinetPay passent par lui ; sinon, ils
 // partent directement de Render comme avant (utile pour tester en local).
-const fixieProxyAgent = process.env.FIXIE_URL ? new ProxyAgent(process.env.FIXIE_URL) : null;
+const fixieProxyAgent = process.env.FIXIE_URL ? new HttpsProxyAgent(process.env.FIXIE_URL) : null;
 if (!fixieProxyAgent) {
   console.warn("⚠️  FIXIE_URL non définie — les appels CinetPay partiront directement de Render (adresse IP non garantie stable).");
 }
@@ -71,11 +72,11 @@ async function getCinetPayAccessToken() {
   if (cinetpayTokenCache.token && Date.now() < cinetpayTokenCache.expiresAt) {
     return cinetpayTokenCache.token;
   }
-  const r = await fetch(`${CINETPAY_BASE_URL}/v1/oauth/login`, {
+  const r = await nodeFetch(`${CINETPAY_BASE_URL}/v1/oauth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ api_key: CINETPAY_API_KEY, api_password: CINETPAY_API_PASSWORD }),
-    ...(fixieProxyAgent ? { dispatcher: fixieProxyAgent } : {}),
+    ...(fixieProxyAgent ? { agent: fixieProxyAgent } : {}),
   });
   if (!r.ok) {
     const detail = await r.text().catch(() => "");
@@ -2488,7 +2489,7 @@ app.post("/api/cinetpay/init-payment", async (req, res) => {
     const merchantTransactionId = `ZK${uid()}`.slice(0, 30); // limite CinetPay : 30 caractères
     const token = await getCinetPayAccessToken();
     const origin = `https://${req.get("host")}`;
-    const r = await fetch(`${CINETPAY_BASE_URL}/v1/payment`, {
+    const r = await nodeFetch(`${CINETPAY_BASE_URL}/v1/payment`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
       body: JSON.stringify({
@@ -2505,7 +2506,7 @@ app.post("/api/cinetpay/init-payment", async (req, res) => {
         failed_url: `${origin}/?cp=failed&kind=${kind}${orderId ? `&orderId=${orderId}` : ""}`,
         notify_url: `${origin}/api/cinetpay/notify`,
       }),
-      ...(fixieProxyAgent ? { dispatcher: fixieProxyAgent } : {}),
+      ...(fixieProxyAgent ? { agent: fixieProxyAgent } : {}),
     });
     if (!r.ok) {
       const detail = await r.text().catch(() => "");
@@ -2531,9 +2532,9 @@ app.post("/api/cinetpay/init-payment", async (req, res) => {
 // justement pour empêcher qu'un attaquant fabrique une fausse notification).
 async function cinetpayCheckTransaction(merchantTransactionId) {
   const token = await getCinetPayAccessToken();
-  const r = await fetch(`${CINETPAY_BASE_URL}/v1/payment/${merchantTransactionId}`, {
+  const r = await nodeFetch(`${CINETPAY_BASE_URL}/v1/payment/${merchantTransactionId}`, {
     headers: { "Authorization": `Bearer ${token}` },
-    ...(fixieProxyAgent ? { dispatcher: fixieProxyAgent } : {}),
+    ...(fixieProxyAgent ? { agent: fixieProxyAgent } : {}),
   });
   return r.json();
 }
