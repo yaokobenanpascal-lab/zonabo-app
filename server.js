@@ -7,6 +7,7 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const { Pool } = require("pg");
+const { ProxyAgent } = require("undici");
 
 const app = express();
 // Nécessaire derrière le proxy de Render pour que req.ip renvoie la vraie
@@ -53,6 +54,15 @@ const CINETPAY_BASE_URL = process.env.CINETPAY_BASE_URL || "https://api.cinetpay
 if (!CINETPAY_API_KEY || !CINETPAY_API_PASSWORD) {
   console.warn("⚠️  CINETPAY_API_KEY / CINETPAY_API_PASSWORD non définis — les paiements CinetPay ne fonctionneront pas tant que ce n'est pas réglé.");
 }
+// Render ne garantit pas une adresse IP sortante stable (elle peut changer),
+// ce que CinetPay exige pourtant via sa liste blanche IP. Fixie fournit une
+// adresse IP fixe via un petit serveur relais (proxy) — si FIXIE_URL est
+// configuré, tous les appels vers CinetPay passent par lui ; sinon, ils
+// partent directement de Render comme avant (utile pour tester en local).
+const fixieProxyAgent = process.env.FIXIE_URL ? new ProxyAgent(process.env.FIXIE_URL) : null;
+if (!fixieProxyAgent) {
+  console.warn("⚠️  FIXIE_URL non définie — les appels CinetPay partiront directement de Render (adresse IP non garantie stable).");
+}
 // Le jeton d'accès CinetPay est valable 24h — on le garde en mémoire et on ne
 // se reconnecte que lorsqu'il est proche d'expirer, plutôt que de refaire un
 // login à chaque appel.
@@ -65,6 +75,7 @@ async function getCinetPayAccessToken() {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ api_key: CINETPAY_API_KEY, api_password: CINETPAY_API_PASSWORD }),
+    ...(fixieProxyAgent ? { dispatcher: fixieProxyAgent } : {}),
   });
   if (!r.ok) {
     const detail = await r.text().catch(() => "");
@@ -2494,6 +2505,7 @@ app.post("/api/cinetpay/init-payment", async (req, res) => {
         failed_url: `${origin}/?cp=failed&kind=${kind}${orderId ? `&orderId=${orderId}` : ""}`,
         notify_url: `${origin}/api/cinetpay/notify`,
       }),
+      ...(fixieProxyAgent ? { dispatcher: fixieProxyAgent } : {}),
     });
     if (!r.ok) {
       const detail = await r.text().catch(() => "");
@@ -2521,6 +2533,7 @@ async function cinetpayCheckTransaction(merchantTransactionId) {
   const token = await getCinetPayAccessToken();
   const r = await fetch(`${CINETPAY_BASE_URL}/v1/payment/${merchantTransactionId}`, {
     headers: { "Authorization": `Bearer ${token}` },
+    ...(fixieProxyAgent ? { dispatcher: fixieProxyAgent } : {}),
   });
   return r.json();
 }
