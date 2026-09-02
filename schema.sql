@@ -488,3 +488,15 @@ CREATE INDEX IF NOT EXISTS idx_negotiations_buyer ON price_negotiations(buyer_ph
 
 -- Migration vers la nouvelle API CinetPay "Aurore" (v1) — jeton d'authenticité du webhook.
 ALTER TABLE pending_payments ADD COLUMN IF NOT EXISTS notify_token TEXT;
+
+-- Suivi anonyme des visiteurs du site (pas de compte, pas d'inscription) — un
+-- identifiant généré côté navigateur, sans aucune donnée personnelle. Sert à
+-- repérer les visiteurs qui reviennent sans s'être inscrits, pour leur
+-- afficher un rappel bienveillant, et à donner une vue d'ensemble au
+-- propriétaire dans son tableau de bord.
+CREATE TABLE IF NOT EXISTS site_visitors (
+  visitor_id TEXT PRIMARY KEY,
+  first_seen BIGINT NOT NULL,
+  last_seen BIGINT NOT NULL,
+  visit_count INTEGER NOT NULL DEFAULT 1
+);
