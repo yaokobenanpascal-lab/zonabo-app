@@ -4038,6 +4038,7 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
   const [resetError, setResetError] = useState("");
   const [resetDone, setResetDone] = useState(false);
   const [revenue, setRevenue] = useState(null);
+  const [visitorStats, setVisitorStats] = useState(null);
   const [withdrawals, setWithdrawals] = useState([]);
   const [showWithdrawals, setShowWithdrawals] = useState(false);
   const [wAmount, setWAmount] = useState("");
@@ -4048,12 +4049,14 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
 
   async function loadRevenueAndWithdrawals() {
     try {
-      const [r, w] = await Promise.all([
+      const [r, w, vs] = await Promise.all([
         apiSend("/api/admin/revenue", "GET", undefined, ownerToken),
         apiSend("/api/admin/withdrawals", "GET", undefined, ownerToken),
+        apiSend("/api/admin/visitors", "GET", undefined, ownerToken),
       ]);
       setRevenue(r);
       setWithdrawals(w);
+      setVisitorStats(vs);
     } catch (e) {
       console.error("Erreur de chargement des revenus:", e);
     }
@@ -4385,6 +4388,31 @@ function OwnerView({ orders, feeRate, updateFeeRate, accessFee, trialDays, updat
             ))}
           </div>
         )}
+      </div>
+
+      <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
+        <p className="f-mono text-[11px] uppercase tracking-wide text-[#14213D]/60 mb-3">👀 Visiteurs du site</p>
+        {visitorStats ? (
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <p className="f-mono text-[9px] uppercase text-[#14213D]/40">Visiteurs uniques</p>
+              <p className="f-display font-semibold text-lg text-[#14213D]">{visitorStats.totalVisitors.toLocaleString("fr-FR")}</p>
+            </div>
+            <div>
+              <p className="f-mono text-[9px] uppercase text-[#14213D]/40">Revenus sans s'inscrire</p>
+              <p className="f-display font-semibold text-lg text-[#C1440E]">{visitorStats.returningVisitors.toLocaleString("fr-FR")}</p>
+            </div>
+            <div>
+              <p className="f-mono text-[9px] uppercase text-[#14213D]/40">7 derniers jours</p>
+              <p className="f-display font-semibold text-lg text-[#2D6A4F]">{visitorStats.last7Days.toLocaleString("fr-FR")}</p>
+            </div>
+          </div>
+        ) : (
+          <p className="f-body text-xs text-[#14213D]/40">Chargement…</p>
+        )}
+        <p className="f-body text-[11px] text-[#14213D]/40 mt-3">
+          Ces visiteurs voient automatiquement un message de rappel bienveillant s'ils reviennent sur le site sans s'être inscrits.
+        </p>
       </div>
 
       <div className="ticket bg-white border-2 border-[#C1440E]/30 p-4 mb-6">
@@ -4937,6 +4965,28 @@ function App() {
     })();
   }, []);
 
+  // Suivi anonyme de visite (aucune donnée personnelle) — un identifiant
+  // généré une seule fois et gardé sur cet appareil, pour repérer si la
+  // personne est déjà venue. Si elle revient sans s'être inscrite nulle
+  // part, on lui affiche un rappel bienveillant l'invitant à s'inscrire.
+  const [welcomeBackNotice, setWelcomeBackNotice] = useState(false);
+  useEffect(() => {
+    (async () => {
+      try {
+        let visitorId = localStorage.getItem("zonako_visitor_id");
+        if (!visitorId) {
+          visitorId = `v${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+          localStorage.setItem("zonako_visitor_id", visitorId);
+        }
+        const { visitCount } = await apiSend("/api/visitors/track", "POST", { visitorId });
+        const alreadyRegistered = loadProfile("buyer") || loadProfile("vendor") || loadProfile("courier");
+        if (visitCount > 1 && !alreadyRegistered) setWelcomeBackNotice(true);
+      } catch (e) {
+        console.error("Erreur suivi de visite (non bloquant):", e);
+      }
+    })();
+  }, []);
+
   // Retour d'un paiement CinetPay (redirection complète, plus de fenêtre
   // intégrée) — on affiche un message adapté, et si une commande a échoué,
   // on l'annule automatiquement (comme le faisait l'ancien guichet en ligne).
@@ -5180,6 +5230,12 @@ function App() {
         <div className={`px-4 py-2.5 text-center f-body text-xs flex items-center justify-center gap-2 ${paymentNotice.type === "success" ? "bg-[#2D6A4F]/15 text-[#2D6A4F]" : "bg-[#C1440E]/15 text-[#C1440E]"}`}>
           <span>{paymentNotice.message}</span>
           <button onClick={() => setPaymentNotice(null)} className="opacity-60 hover:opacity-100">✕</button>
+        </div>
+      )}
+      {welcomeBackNotice && (
+        <div className="px-4 py-2.5 text-center f-body text-xs flex items-center justify-center gap-2 bg-[#F2A93B]/15 text-[#14213D]">
+          <span>👋 Content de te revoir ! Inscris-toi en toute confiance sur Zonako — c'est gratuit et ça prend une minute.</span>
+          <button onClick={() => setWelcomeBackNotice(false)} className="opacity-60 hover:opacity-100">✕</button>
         </div>
       )}
       {loading ? (
