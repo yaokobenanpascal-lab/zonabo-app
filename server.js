@@ -2854,7 +2854,48 @@ async function checkLowStockAndNotify(productId) {
   await logNotification(p.vendor_phone, `low_stock_${productId}`, productId);
 }
 
-// Route diagnostique TEMPORAIRE — révèle l'adresse IP sortante réelle du
+// ==================== VISITEURS DU SITE (rappel bienveillant) ====================
+// Suivi anonyme (aucune donnée personnelle) : un identifiant généré côté
+// navigateur, stocké localement chez le visiteur — sert seulement à repérer
+// s'il est déjà venu, pour lui afficher un message de rappel s'il revient
+// sans s'être inscrit, et à donner une vue d'ensemble au propriétaire.
+app.post("/api/visitors/track", async (req, res) => {
+  const { visitorId } = req.body;
+  if (!visitorId || typeof visitorId !== "string") return res.status(400).json({ error: "visitorId requis." });
+  const now = Date.now();
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO site_visitors (visitor_id, first_seen, last_seen, visit_count)
+       VALUES ($1,$2,$2,1)
+       ON CONFLICT (visitor_id) DO UPDATE SET last_seen = $2, visit_count = site_visitors.visit_count + 1
+       RETURNING visit_count`,
+      [visitorId.slice(0, 64), now]
+    );
+    res.json({ visitCount: rows[0].visit_count });
+  } catch (e) {
+    console.error("Erreur suivi visiteur (non bloquant):", e.message);
+    res.json({ visitCount: 1 }); // on ne bloque jamais l'affichage du site pour ça
+  }
+});
+
+// Vue d'ensemble pour le propriétaire — combien de visiteurs uniques, combien
+// reviennent sans s'être inscrits. Aucune donnée personnelle à afficher, juste
+// des compteurs.
+app.get("/api/admin/visitors", requireOwner, async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE visit_count > 1)::int AS returning_count,
+            COUNT(*) FILTER (WHERE last_seen > $1)::int AS last_7_days
+     FROM site_visitors`,
+    [Date.now() - 7 * 24 * 3600 * 1000]
+  );
+  res.json({
+    totalVisitors: rows[0].total,
+    returningVisitors: rows[0].returning_count,
+    last7Days: rows[0].last_7_days,
+  });
+});
+
 // serveur, pour la renseigner dans la liste blanche IP de CinetPay. À
 // retirer une fois cette information récupérée (pas destinée à rester en
 // production indéfiniment).
