@@ -111,6 +111,10 @@ if (!AFRICASTALKING_CONFIGURED) {
   console.warn("⚠️  Africa's Talking non configuré — les codes SMS utiliseront Twilio (si configuré) ou s'afficheront dans les logs (mode test).");
 }
 async function sendSmsViaAfricasTalking(phone, message) {
+  // Africa's Talking rejette tout numéro contenant un espace ou un caractère
+  // autre que des chiffres/+ (confirmé par un vrai test) — on nettoie ici,
+  // au niveau de la fonction, pour protéger tous les appels.
+  const cleanPhone = String(phone).replace(/[^0-9+]/g, "");
   const r = await fetch("https://api.africastalking.com/version1/messaging", {
     method: "POST",
     headers: {
@@ -118,7 +122,7 @@ async function sendSmsViaAfricasTalking(phone, message) {
       "Content-Type": "application/x-www-form-urlencoded",
       "Accept": "application/json",
     },
-    body: new URLSearchParams({ username: AFRICASTALKING_USERNAME, to: phone, message }),
+    body: new URLSearchParams({ username: AFRICASTALKING_USERNAME, to: cleanPhone, message }),
   });
   const raw = await r.text();
   if (!r.ok) {
