@@ -447,6 +447,7 @@ function mapProfile(r) {
     vehicleType: r.vehicle_type || "",
     vehiclePlate: r.vehicle_plate || "",
     walletBalance: r.wallet_balance !== null && r.wallet_balance !== undefined ? Number(r.wallet_balance) : 0,
+    vitrineImageUrl: r.vitrine_image_url || "",
   };
 }
 function mapReport(r) {
@@ -778,6 +779,51 @@ app.post("/api/products/generate-description", requirePhone((req) => req.body.ve
   }
 });
 
+// Détection automatique du type d'article, à partir de sa photo (via Claude
+// vision) — pré-sélectionne intelligemment la bonne mise en scène/mannequin,
+// plutôt que de laisser chaque vendeur deviner la bonne catégorie parmi 14
+// options. Le vendeur garde toujours la main pour corriger si besoin — cette
+// détection ne fait que suggérer un point de départ, jamais un blocage.
+const MANNEQUIN_CATEGORIES = [
+  "Vêtement femme", "Vêtement homme", "Costume / Tenue formelle", "Vêtement bébé / enfant",
+  "Chaussures", "Montre", "Bijoux", "Sac / Accessoire", "Électronique / Téléphone",
+  "Maison / Déco", "Cuisine / Ustensiles", "Beauté / Cosmétique", "Jouet / Enfant", "Véhicule / Engin",
+];
+app.post("/api/products/detect-category", requirePhone((req) => req.body.vendorPhone), async (req, res) => {
+  const { imageUrl } = req.body;
+  if (!imageUrl) return res.status(400).json({ error: "Photo requise." });
+  if (!ANTHROPIC_API_KEY) return res.json({ category: null }); // pas bloquant : le vendeur choisit manuellement
+  try {
+    const imgResp = await fetch(imageUrl);
+    const buf = Buffer.from(await imgResp.arrayBuffer());
+    const base64 = buf.toString("base64");
+    const mediaType = imgResp.headers.get("content-type") || "image/png";
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 30,
+        messages: [{
+          role: "user",
+          content: [
+            { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
+            { type: "text", text: `Quel type d'article est montré sur cette photo ? Choisis EXACTEMENT une de ces catégories, réponds uniquement avec le texte exact de la catégorie choisie, rien d'autre : ${MANNEQUIN_CATEGORIES.join(" | ")}` },
+          ],
+        }],
+      }),
+    });
+    if (!r.ok) return res.json({ category: null });
+    const data = await r.json();
+    const raw = (data.content || []).map((b) => b.text || "").join("").trim();
+    const detected = MANNEQUIN_CATEGORIES.find((c) => raw.includes(c)) || null;
+    res.json({ category: detected });
+  } catch (e) {
+    console.error("Erreur détection catégorie (non bloquant):", e.message);
+    res.json({ category: null });
+  }
+});
+
 // Photo "mannequin" générée par IA à partir d'une photo de l'article (via
 // Runway) — image fixe uniquement, pas de vidéo (bien moins coûteux).
 // NOTE : intégration basée sur notre meilleure compréhension de l'API Runway
@@ -785,7 +831,7 @@ app.post("/api/products/generate-description", requirePhone((req) => req.body.ve
 // contrairement aux autres intégrations (Cloudinary, Anthropic) déjà vérifiées.
 app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.body.vendorPhone), async (req, res) => {
   if (!RUNWAY_API_KEY) return res.status(500).json({ error: "La génération de photo mannequin n'est pas encore configurée sur le serveur." });
-  const { imageUrl, imageUrls, itemLabels, displayType, pose, style, customInstructions } = req.body;
+  const { imageUrl, imageUrls, itemLabels, displayType, pose, style, mannequinColor, customInstructions } = req.body;
   if (!imageUrl) return res.status(400).json({ error: "Choisis d'abord une photo de l'article." });
   // Pour un ensemble complet (plusieurs articles vendus comme un seul
   // produit), on peut fournir jusqu'à 5 photos de référence — une par
@@ -815,13 +861,21 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
       "Dos": "standing with back turned toward the camera, showing the back of the outfit",
     };
     const poseText = POSES[pose] || POSES["Trois-quarts"];
+    // Couleur/matière du mannequin — beaucoup de vraies boutiques utilisent
+    // des mannequins de teintes différentes, pas seulement blancs.
+    const MANNEQUIN_COLORS = {
+      "Blanc": "white plastic",
+      "Noir": "matte black plastic",
+      "Gris": "matte grey plastic",
+    };
+    const mannequinMaterial = MANNEQUIN_COLORS[mannequinColor] || MANNEQUIN_COLORS["Blanc"];
     // Vêtement femme/homme : mannequin en pied (tête aux pieds), pas juste un
     // buste — pour représenter la tenue complète (y compris un couvre-chef,
     // foulard ou voile s'il fait partie de l'article/ensemble sur la photo).
     const FULL_BODY_CLOTHING = (gender) =>
-      `A white plastic full-body ${gender}-presenting display mannequin (head to toe, including a head form) wearing the complete outfit exactly as shown in the reference photo — including any headwear, veil, headscarf or hat if part of the item(s) shown, ${poseText}, ${STUDIO_BASE}`;
+      `A ${mannequinMaterial} full-body ${gender}-presenting display mannequin (head to toe, including a head form) wearing the complete outfit exactly as shown in the reference photo — including any headwear, veil, headscarf or hat if part of the item(s) shown, ${poseText}, ${STUDIO_BASE}`;
     const FORMAL_SUIT =
-      `A white plastic full-body male-presenting display mannequin (head to toe, including a head form) wearing this exact complete formal suit exactly as shown in the reference photo (jacket, trousers, and any vest, tie or accessories included), premium tailored menswear presentation, sharp confident posture, ${poseText}, ${STUDIO_BASE}`;
+      `A ${mannequinMaterial} full-body male-presenting display mannequin (head to toe, including a head form) wearing this exact complete formal suit exactly as shown in the reference photo (jacket, trousers, and any vest, tie or accessories included), premium tailored menswear presentation, sharp confident posture, ${poseText}, ${STUDIO_BASE}`;
     // Ensemble vendu comme UN SEUL produit (un seul prix) — tous les articles
     // montrés sur la photo de référence doivent apparaître ensemble, quel que
     // soit leur type (vêtement, chaussures, montre, sac, bijoux...). Jusqu'à
@@ -835,7 +889,7 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
       ? ` Reference photos: ${cleanLabels.map((l, i) => `#${i + 1}=${l}`).join(", ")}. Include EVERY one of these items, each exactly matching its own photo — never skip, invent, or restyle any.`
       : " Use every reference photo provided, each item exactly as shown — do not skip, invent, or restyle any.";
     const ENSEMBLE =
-      `A white plastic full-body display mannequin (head to toe) wearing every item from ALL reference photos together as one matching outfit — accessories (shoes, watch, bag, jewelry, hat) placed naturally, all visible at once, ${poseText}, ${STUDIO_BASE}${refNote}`;
+      `A ${mannequinMaterial} full-body display mannequin (head to toe) wearing every item from ALL reference photos together as one matching outfit — accessories (shoes, watch, bag, jewelry, hat) placed naturally, all visible at once, ${poseText}, ${STUDIO_BASE}${refNote}`;
     const PROMPTS = {
       "Vêtement femme": FULL_BODY_CLOTHING("female"),
       "Vêtement homme": FULL_BODY_CLOTHING("male"),
@@ -1031,6 +1085,116 @@ app.post("/api/products/change-background", requirePhone((req) => req.body.vendo
   } catch (e) {
     console.error("Erreur pendant le changement de fond (Runway):", e);
     res.status(500).json({ error: e.message || "Impossible de changer le fond pour l'instant." });
+  }
+});
+
+// "Vitrine de magasin" — combine jusqu'à 3 produits déjà publiés par le
+// vendeur en une seule image, arrangés comme dans une vraie vitrine de
+// boutique physique (téléphones, articles divers posés élégamment sur une
+// étagère ou dans une vitrine vitrée) — affichée ensuite en bannière sur sa
+// page boutique publique. Réutilise le même principe de fidélité +
+// vérification/nouvelle tentative que la photo mannequin, en autonome.
+app.post("/api/vendors/:phone/generate-vitrine", requirePhone((req) => req.params.phone), async (req, res) => {
+  if (!RUNWAY_API_KEY) return res.status(500).json({ error: "La génération de vitrine n'est pas encore configurée sur le serveur." });
+  const { items } = req.body; // [{ imageUrl, label }] — jusqu'à 3 produits
+  if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: "Sélectionne au moins un produit pour ta vitrine." });
+  const refItems = items.slice(0, 3);
+  const requestedUrls = refItems.map((it) => it.imageUrl).filter(Boolean);
+  if (requestedUrls.length === 0) return res.status(400).json({ error: "Photos de produit manquantes." });
+  // SÉCURITÉ : on ne fait jamais confiance aux URLs d'image envoyées telles
+  // quelles — sans ça, n'importe qui pourrait demander à générer une vitrine
+  // à partir d'images arbitraires (pas forcément de vrais produits Zonako, ni
+  // même les siens). On vérifie que chaque photo appartient bien à un vrai
+  // produit publié par CE vendeur authentifié.
+  const { rows: ownProducts } = await pool.query(
+    "SELECT image_url, image_urls FROM products WHERE vendor_phone = $1",
+    [req.params.phone]
+  );
+  const ownedUrls = new Set(ownProducts.flatMap((p) => [p.image_url, ...(p.image_urls || [])].filter(Boolean)));
+  const refUrls = requestedUrls.filter((u) => ownedUrls.has(u));
+  if (refUrls.length === 0) return res.status(403).json({ error: "Ces photos ne correspondent à aucun de tes produits publiés." });
+  const cleanLabels = refItems.filter((it) => refUrls.includes(it.imageUrl)).map((it) => String(it.label || "").trim()).filter(Boolean);
+
+  const FIDELITY = "CRITICAL: keep each item EXACTLY as shown in its own reference photo — same colors, shapes, patterns, materials. Only change the setting/arrangement, never the items themselves.";
+  const refNote = cleanLabels.length
+    ? ` Items to display: ${cleanLabels.map((l, i) => `#${i + 1}=${l}`).join(", ")}. Include EVERY one of these items, each exactly matching its own photo — never skip, invent, or restyle any.`
+    : " Display every reference photo provided, each item exactly as shown — do not skip, invent, or restyle any.";
+  const promptText = `A professional, elegantly lit retail store display window (vitrine), showcasing multiple real products arranged attractively together on a clean shelf or inside a glass display case — premium boutique presentation, soft directional studio lighting, subtle navy blue and gold accents in the background, inviting and professional atmosphere, no people visible.${refNote} ${FIDELITY}`;
+
+  async function generateVitrineOnce() {
+    const createResp = await fetch("https://api.dev.runwayml.com/v1/text_to_image", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${RUNWAY_API_KEY}`, "X-Runway-Version": "2024-11-06" },
+      body: JSON.stringify({ model: "gen4_image", promptText, referenceImages: refUrls.map((uri) => ({ uri })), ratio: "1024:1024" }),
+    });
+    if (!createResp.ok) {
+      const detail = await createResp.text().catch(() => "");
+      throw new Error(`Runway (création) a répondu ${createResp.status} : ${detail}`);
+    }
+    const created = await createResp.json();
+    const taskId = created.id;
+    if (!taskId) throw new Error("Runway n'a pas renvoyé d'identifiant de tâche.");
+    let output = null;
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const pollResp = await fetch(`https://api.dev.runwayml.com/v1/tasks/${taskId}`, {
+        headers: { "Authorization": `Bearer ${RUNWAY_API_KEY}`, "X-Runway-Version": "2024-11-06" },
+      });
+      if (!pollResp.ok) continue;
+      const poll = await pollResp.json();
+      if (poll.status === "SUCCEEDED") { output = poll.output?.[0] || null; break; }
+      if (poll.status === "FAILED") throw new Error(poll.failure || "La génération Runway a échoué.");
+    }
+    if (!output) throw new Error("La génération prend plus de temps que prévu — réessaie dans un instant.");
+    return await reuploadToCloudinary(output);
+  }
+
+  // Vérifie que tous les produits attendus apparaissent bien, fidèlement à
+  // leur propre photo — même logique que pour la photo mannequin.
+  async function verifyVitrineResult(generatedUrl, refPhotoUrls, labels) {
+    if (!ANTHROPIC_API_KEY) return true;
+    try {
+      const toBase64 = async (url) => {
+        const resp = await fetch(url);
+        const buf = Buffer.from(await resp.arrayBuffer());
+        return { media_type: resp.headers.get("content-type") || "image/png", data: buf.toString("base64") };
+      };
+      const generated = await toBase64(generatedUrl);
+      const refs = await Promise.all(refPhotoUrls.map(toBase64));
+      const namedLabels = labels.length === refPhotoUrls.length ? labels : refPhotoUrls.map((_, i) => `article ${i + 1}`);
+      const refList = namedLabels.map((l, i) => `Photo de référence ${i + 2} = ${l}`).join(". ");
+      const content = [
+        { type: "image", source: { type: "base64", media_type: generated.media_type, data: generated.data } },
+        ...refs.map((r) => ({ type: "image", source: { type: "base64", media_type: r.media_type, data: r.data } })),
+        { type: "text", text: `La première image est une vitrine de magasin générée par IA. Les images suivantes sont les vraies photos de référence des produits réels : ${refList}. Est-ce que la première image montre CHACUN de ces produits, avec exactement la même couleur, forme et taille que sur sa photo de référence ? Réponds STRICTEMENT en JSON, rien d'autre, format exact : {"ok": true} ou {"ok": false}` },
+      ];
+      const r = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens: 50, messages: [{ role: "user", content }] }),
+      });
+      if (!r.ok) return true;
+      const data = await r.json();
+      const raw = (data.content || []).map((b) => b.text || "").join("").trim().replace(/```json|```/g, "").trim();
+      return !!JSON.parse(raw).ok;
+    } catch (e) {
+      console.error("Vérification vitrine : erreur inattendue —", e.message);
+      return true;
+    }
+  }
+
+  try {
+    let permanentUrl = await generateVitrineOnce();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const ok = await verifyVitrineResult(permanentUrl, refUrls, cleanLabels);
+      if (ok) break;
+      permanentUrl = await generateVitrineOnce();
+    }
+    await pool.query("UPDATE profiles SET vitrine_image_url = $1 WHERE role = 'vendor' AND phone = $2", [permanentUrl, req.params.phone]);
+    res.json({ imageUrl: permanentUrl });
+  } catch (e) {
+    console.error("Erreur pendant la génération de vitrine (Runway):", e);
+    res.status(500).json({ error: e.message || "Impossible de générer la vitrine pour l'instant." });
   }
 });
 
