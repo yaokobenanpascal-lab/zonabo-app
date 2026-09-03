@@ -786,7 +786,7 @@ app.post("/api/products/generate-description", requirePhone((req) => req.body.ve
 // détection ne fait que suggérer un point de départ, jamais un blocage.
 const MANNEQUIN_CATEGORIES = [
   "Vêtement femme", "Vêtement homme", "Costume / Tenue formelle", "Vêtement bébé / enfant",
-  "Chaussures", "Montre", "Bijoux", "Sac / Accessoire", "Électronique / Téléphone",
+  "Chaussures", "Montre", "Bijoux", "Lunettes", "Sac / Accessoire", "Électronique / Téléphone",
   "Maison / Déco", "Cuisine / Ustensiles", "Beauté / Cosmétique", "Jouet / Enfant", "Véhicule / Engin",
 ];
 app.post("/api/products/detect-category", requirePhone((req) => req.body.vendorPhone), async (req, res) => {
@@ -904,9 +904,10 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
       "Costume / Tenue formelle": FORMAL_SUIT,
       "Ensemble complet (plusieurs articles)": ENSEMBLE,
       "Vêtement bébé / enfant": `This exact baby or children's garment displayed neatly on a small soft-padded infant display form or flat-laid with gentle folds, warm and clean nursery-style presentation, ${STUDIO_BASE}`,
-      "Chaussures": `A pair of this exact shoes displayed on a minimal clear acrylic shoe stand, front three-quarter angle, floating slightly above a neutral ground plane, ${STUDIO_BASE}`,
+      "Chaussures": `A pair of this exact shoes worn naturally on a mannequin's lower legs and feet (from mid-calf down, standing pose), realistic natural stance, ${STUDIO_BASE}`,
       "Montre": `A close-up of this exact watch worn on a neutral light-toned wrist, arm resting naturally at a slight angle, focus sharp on the watch face and strap, ${STUDIO_BASE}`,
       "Bijoux": `This exact jewelry piece elegantly presented on a minimal white jewelry display stand (bust, ring cone, or earring card as appropriate to the item type), ${STUDIO_BASE}`,
+      "Lunettes": `This exact pair of glasses or sunglasses worn naturally on a mannequin head (head and shoulders only, neutral facial features, no visible eyes needed), front-facing, ${STUDIO_BASE}`,
       "Sac / Accessoire": `This exact bag or accessory placed upright on a minimal round pedestal, front three-quarter angle, ${STUDIO_BASE}`,
       "Électronique / Téléphone": `This exact electronic device or phone displayed upright on a minimal tech-style pedestal stand, screen angled slightly toward camera if applicable, ${STUDIO_BASE}`,
       "Maison / Déco": `This exact home or decor item staged naturally within a tastefully minimal, softly lit interior setting (neutral shelf, table or console), giving a sense of scale and real use. ${FIDELITY}`,
