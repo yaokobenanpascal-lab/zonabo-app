@@ -500,3 +500,8 @@ CREATE TABLE IF NOT EXISTS site_visitors (
   last_seen BIGINT NOT NULL,
   visit_count INTEGER NOT NULL DEFAULT 1
 );
+
+-- "Vitrine de magasin" — image générée par IA regroupant plusieurs produits
+-- réels du vendeur, arrangés comme dans une vraie vitrine de boutique.
+-- Affichée en bannière sur sa page boutique publique.
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS vitrine_image_url TEXT;
