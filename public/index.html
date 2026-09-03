@@ -3050,12 +3050,17 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                     <option>Montre</option>
                     <option>Bijoux</option>
                     <option>Lunettes</option>
+                    <option>Perruques / Mèches</option>
                     <option>Sac / Accessoire</option>
                     <option>Électronique / Téléphone</option>
                     <option>Maison / Déco</option>
+                    <option>Meubles</option>
+                    <option>Quincaillerie / Construction</option>
                     <option>Cuisine / Ustensiles</option>
+                    <option>Alimentation / Épicerie</option>
                     <option>Beauté / Cosmétique</option>
                     <option>Jouet / Enfant</option>
+                    <option>Tissus / Pagnes au mètre</option>
                     <option>Véhicule / Engin</option>
                   </select>
                   {(displayType === "Vêtement femme" || displayType === "Vêtement homme" || displayType === "Costume / Tenue formelle" || displayType === "Ensemble complet (plusieurs articles)") && (
@@ -3073,7 +3078,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                       <option>Gris</option>
                     </select>
                   )}
-                  {displayType !== "Maison / Déco" && displayType !== "Véhicule / Engin" && (
+                  {displayType !== "Maison / Déco" && displayType !== "Véhicule / Engin" && displayType !== "Meubles" && displayType !== "Alimentation / Épicerie" && (
                     <select value={mannequinStyle} onChange={(e) => setMannequinStyle(e.target.value)} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-xs mb-1.5">
                       <option>Studio épuré</option>
                       <option>Boutique chic</option>
