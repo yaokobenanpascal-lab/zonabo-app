@@ -100,6 +100,32 @@ if (!TWILIO_CONFIGURED) {
   console.warn("⚠️  Twilio Verify non configuré — les codes SMS s'afficheront dans les logs du serveur au lieu d'être envoyés par SMS (mode test).");
 }
 
+// Africa's Talking (SMS) — fournisseur pensé pour l'Afrique, utilisé en
+// priorité pour l'envoi des codes de vérification par téléphone (Twilio
+// n'ayant, contrairement à eux, pas de service "Verify" tout fait : on gère
+// nous-mêmes la génération et la vérification du code, comme pour l'email).
+const AFRICASTALKING_API_KEY = process.env.AFRICASTALKING_API_KEY || "";
+const AFRICASTALKING_USERNAME = process.env.AFRICASTALKING_USERNAME || "";
+const AFRICASTALKING_CONFIGURED = AFRICASTALKING_API_KEY && AFRICASTALKING_USERNAME;
+if (!AFRICASTALKING_CONFIGURED) {
+  console.warn("⚠️  Africa's Talking non configuré — les codes SMS utiliseront Twilio (si configuré) ou s'afficheront dans les logs (mode test).");
+}
+async function sendSmsViaAfricasTalking(phone, message) {
+  const r = await fetch("https://api.africastalking.com/version1/messaging", {
+    method: "POST",
+    headers: {
+      "apiKey": AFRICASTALKING_API_KEY,
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Accept": "application/json",
+    },
+    body: new URLSearchParams({ username: AFRICASTALKING_USERNAME, to: phone, message }),
+  });
+  if (!r.ok) {
+    const detail = await r.text().catch(() => "");
+    throw new Error(`Africa's Talking a répondu ${r.status} : ${detail}`);
+  }
+}
+
 // Connexion par email (en plus du téléphone) — envoie un code par email via
 // l'API HTTP de Brevo (pas le SMTP classique : Render bloque les ports SMTP
 // 25/465/587 sur le plan gratuit depuis septembre 2025, l'API HTTP passe par
@@ -500,14 +526,18 @@ async function twilioCheckCode(phone, code) {
 // Si non configuré, la notification est simplement ignorée (pas d'erreur).
 const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER || "";
 async function sendSmsNotification(phone, message) {
-  if (!TWILIO_CONFIGURED || !TWILIO_FROM_NUMBER || !phone) return;
+  if (!phone) return;
   try {
-    const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
-    await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`, {
-      method: "POST",
-      headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ From: TWILIO_FROM_NUMBER, To: phone, Body: message }),
-    });
+    if (AFRICASTALKING_CONFIGURED) {
+      await sendSmsViaAfricasTalking(phone, message);
+    } else if (TWILIO_CONFIGURED && TWILIO_FROM_NUMBER) {
+      const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
+      await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`, {
+        method: "POST",
+        headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ From: TWILIO_FROM_NUMBER, To: phone, Body: message }),
+      });
+    }
   } catch (e) {
     console.error("Erreur d'envoi SMS de notification (non bloquant):", e.message);
   }
@@ -553,20 +583,31 @@ app.post("/api/auth/send-code", async (req, res) => {
       recordOtpAttempt(phone);
       return res.json({ ok: true, testMode: !EMAIL_CONFIGURED });
     }
-    if (TWILIO_CONFIGURED) {
-      await twilioSendCode(phone);
-    } else {
-      // Mode test sans Twilio : code à 6 chiffres, valable 10 min, affiché dans les logs serveur.
+    if (AFRICASTALKING_CONFIGURED) {
+      // Africa's Talking n'a pas de service "Verify" tout fait comme Twilio —
+      // on génère et vérifie nous-mêmes le code, comme pour l'email.
       const code = String(Math.floor(100000 + Math.random() * 900000));
       await pool.query(
         `INSERT INTO otp_codes (phone, code, expires_at, attempts) VALUES ($1,$2,$3,0)
          ON CONFLICT (phone) DO UPDATE SET code = $2, expires_at = $3, attempts = 0`,
         [phone, code, Date.now() + 10 * 60 * 1000]
       );
-      console.log(`[MODE TEST — pas de Twilio configuré] Code de vérification pour ${phone} : ${code}`);
+      await sendSmsViaAfricasTalking(phone, `Ton code de vérification Zonako est : ${code}. Il est valable 10 minutes.`);
+    } else if (TWILIO_CONFIGURED) {
+      await twilioSendCode(phone);
+    } else {
+      // Mode test sans fournisseur SMS configuré : code à 6 chiffres, valable
+      // 10 min, affiché dans les logs du serveur.
+      const code = String(Math.floor(100000 + Math.random() * 900000));
+      await pool.query(
+        `INSERT INTO otp_codes (phone, code, expires_at, attempts) VALUES ($1,$2,$3,0)
+         ON CONFLICT (phone) DO UPDATE SET code = $2, expires_at = $3, attempts = 0`,
+        [phone, code, Date.now() + 10 * 60 * 1000]
+      );
+      console.log(`[MODE TEST — aucun fournisseur SMS configuré] Code de vérification pour ${phone} : ${code}`);
     }
     recordOtpAttempt(phone);
-    res.json({ ok: true, testMode: !TWILIO_CONFIGURED });
+    res.json({ ok: true, testMode: !AFRICASTALKING_CONFIGURED && !TWILIO_CONFIGURED });
   } catch (e) {
     console.error("Erreur d'envoi du code:", e);
     res.status(500).json({ error: "Impossible d'envoyer le code. Réessaie." });
@@ -579,7 +620,7 @@ app.post("/api/auth/verify-code", async (req, res) => {
   const isEmail = phone.includes("@");
   try {
     let ok = false;
-    if (!isEmail && TWILIO_CONFIGURED) {
+    if (!isEmail && !AFRICASTALKING_CONFIGURED && TWILIO_CONFIGURED) {
       ok = await twilioCheckCode(phone, code);
     } else {
       const { rows } = await pool.query("SELECT * FROM otp_codes WHERE phone = $1", [phone]);
