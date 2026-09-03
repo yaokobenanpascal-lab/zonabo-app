@@ -120,9 +120,19 @@ async function sendSmsViaAfricasTalking(phone, message) {
     },
     body: new URLSearchParams({ username: AFRICASTALKING_USERNAME, to: phone, message }),
   });
+  const raw = await r.text();
   if (!r.ok) {
-    const detail = await r.text().catch(() => "");
-    throw new Error(`Africa's Talking a répondu ${r.status} : ${detail}`);
+    throw new Error(`Africa's Talking a répondu ${r.status} : ${raw}`);
+  }
+  // Le statut HTTP peut être 200/201 même si l'envoi a réellement échoué pour
+  // ce numéro précis (solde insuffisant, format invalide...) — le vrai
+  // résultat est signalé par destinataire, à l'intérieur de la réponse.
+  let data;
+  try { data = JSON.parse(raw); } catch { data = null; }
+  const recipient = data?.SMSMessageData?.Recipients?.[0];
+  console.log(`Africa's Talking — envoi à ${phone} :`, raw);
+  if (recipient && recipient.status !== "Success") {
+    throw new Error(`Africa's Talking n'a pas pu livrer le SMS (${recipient.status}) : ${recipient.statusCode}`);
   }
 }
 
@@ -561,6 +571,7 @@ function recordOtpAttempt(phone) {
 
 app.post("/api/auth/send-code", async (req, res) => {
   const { phone } = req.body; // "phone" reste le nom du champ pour rester compatible, mais peut être un email
+  console.log(`Demande de code de vérification reçue pour : ${phone}`);
   if (!phone) return res.status(400).json({ error: "Numéro de téléphone ou email requis." });
   if (isRateLimited(phone)) {
     return res.status(429).json({ error: "Trop de demandes de code pour cet identifiant. Réessaie dans une heure." });
