@@ -792,6 +792,7 @@ const MANNEQUIN_CATEGORIES = [
 app.post("/api/products/detect-category", requirePhone((req) => req.body.vendorPhone), async (req, res) => {
   const { imageUrl } = req.body;
   if (!imageUrl) return res.status(400).json({ error: "Photo requise." });
+  if (!String(imageUrl).startsWith("https://res.cloudinary.com/kylr0amb/")) return res.status(400).json({ error: "Photo invalide." });
   if (!ANTHROPIC_API_KEY) return res.json({ category: null }); // pas bloquant : le vendeur choisit manuellement
   try {
     const imgResp = await fetch(imageUrl);
@@ -833,6 +834,13 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
   if (!RUNWAY_API_KEY) return res.status(500).json({ error: "La génération de photo mannequin n'est pas encore configurée sur le serveur." });
   const { imageUrl, imageUrls, itemLabels, displayType, pose, style, mannequinColor, customInstructions } = req.body;
   if (!imageUrl) return res.status(400).json({ error: "Choisis d'abord une photo de l'article." });
+  // SÉCURITÉ : on n'accepte que des images hébergées sur notre propre
+  // Cloudinary (celles réellement envoyées par le vendeur via notre flux
+  // d'upload) — jamais un lien externe arbitraire fourni directement à l'API.
+  const allUrls = [imageUrl, ...(Array.isArray(imageUrls) ? imageUrls : [])];
+  if (allUrls.some((u) => !String(u).startsWith("https://res.cloudinary.com/kylr0amb/"))) {
+    return res.status(400).json({ error: "Photo invalide." });
+  }
   // Pour un ensemble complet (plusieurs articles vendus comme un seul
   // produit), on peut fournir jusqu'à 5 photos de référence — une par
   // article (pantalon, chemise, chapeau, chaussures, montre...) — pour que
@@ -1038,6 +1046,11 @@ app.post("/api/products/change-background", requirePhone((req) => req.body.vendo
   if (!RUNWAY_API_KEY) return res.status(500).json({ error: "Le changement de fond n'est pas encore configuré sur le serveur." });
   const { imageUrl, backgroundStyle } = req.body;
   if (!imageUrl) return res.status(400).json({ error: "Choisis d'abord une photo de l'article." });
+  // SÉCURITÉ : même protection que pour la photo mannequin — uniquement des
+  // images hébergées sur notre propre Cloudinary.
+  if (!String(imageUrl).startsWith("https://res.cloudinary.com/kylr0amb/")) {
+    return res.status(400).json({ error: "Photo invalide." });
+  }
   try {
     const FIDELITY = "CRITICAL: keep the exact same product completely unchanged — same angle, same proportions, same colors, same shadows falling on the product itself, same reflections on it. Do not alter, reinterpret, or invent anything about the product. Only replace what is BEHIND and AROUND it — the backdrop, floor and surrounding environment — never the product itself.";
     const BACKGROUNDS = {
@@ -1113,13 +1126,16 @@ app.post("/api/vendors/:phone/generate-vitrine", requirePhone((req) => req.param
   const ownedUrls = new Set(ownProducts.flatMap((p) => [p.image_url, ...(p.image_urls || [])].filter(Boolean)));
   const refUrls = requestedUrls.filter((u) => ownedUrls.has(u));
   if (refUrls.length === 0) return res.status(403).json({ error: "Ces photos ne correspondent à aucun de tes produits publiés." });
-  const cleanLabels = refItems.filter((it) => refUrls.includes(it.imageUrl)).map((it) => String(it.label || "").trim()).filter(Boolean);
+  const cleanLabels = refItems.filter((it) => refUrls.includes(it.imageUrl)).map((it) => String(it.label || "").trim().slice(0, 40)).filter(Boolean);
 
   const FIDELITY = "CRITICAL: keep each item EXACTLY as shown in its own reference photo — same colors, shapes, patterns, materials. Only change the setting/arrangement, never the items themselves.";
   const refNote = cleanLabels.length
     ? ` Items to display: ${cleanLabels.map((l, i) => `#${i + 1}=${l}`).join(", ")}. Include EVERY one of these items, each exactly matching its own photo — never skip, invent, or restyle any.`
     : " Display every reference photo provided, each item exactly as shown — do not skip, invent, or restyle any.";
-  const promptText = `A professional, elegantly lit retail store display window (vitrine), showcasing multiple real products arranged attractively together on a clean shelf or inside a glass display case — premium boutique presentation, soft directional studio lighting, subtle navy blue and gold accents in the background, inviting and professional atmosphere, no people visible.${refNote} ${FIDELITY}`;
+  // Filet de sécurité final : même avec les étiquettes déjà limitées
+  // ci-dessus, on garantit ici de ne jamais dépasser la limite de 1000
+  // caractères de Runway, quoi qu'il arrive.
+  const promptText = `A professional, elegantly lit retail store display window (vitrine), showcasing multiple real products arranged attractively together on a clean shelf or inside a glass display case — premium boutique presentation, soft directional studio lighting, subtle navy blue and gold accents in the background, inviting and professional atmosphere, no people visible.${refNote} ${FIDELITY}`.slice(0, 999);
 
   async function generateVitrineOnce() {
     const createResp = await fetch("https://api.dev.runwayml.com/v1/text_to_image", {
