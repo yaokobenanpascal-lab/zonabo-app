@@ -516,6 +516,12 @@ function VendorBoutiqueView({ vendorPhone, products, onClose, onOpenProduct }) {
   const items = products.filter((p) => p.vendorPhone === vendorPhone);
   const vendorName = items[0]?.vendorName || "Boutique";
   const landmark = items[0]?.vendorLandmark || "";
+  const [vitrineImageUrl, setVitrineImageUrl] = useState("");
+  useEffect(() => {
+    apiGet(`/api/profiles/vendor/${encodeURIComponent(vendorPhone)}`)
+      .then((p) => setVitrineImageUrl(p.vitrineImageUrl || ""))
+      .catch(() => {}); // pas grave si indisponible, la page fonctionne sans
+  }, [vendorPhone]);
   return (
     <div className="fixed inset-0 bg-[#FBF7F0] z-40 overflow-y-auto">
       <div className="sticky top-0 bg-[#14213D] text-white px-4 py-4 z-10">
@@ -528,6 +534,9 @@ function VendorBoutiqueView({ vendorPhone, products, onClose, onOpenProduct }) {
         </div>
         <p className="f-mono text-xs text-white/50 mt-1">{items.length} article{items.length > 1 ? "s" : ""}</p>
       </div>
+      {vitrineImageUrl && (
+        <img src={enhancedImageUrl(vitrineImageUrl, 900)} alt={`Vitrine de ${vendorName}`} loading="lazy" className="w-full max-h-64 object-cover" />
+      )}
       <div className="max-w-5xl mx-auto p-4">
         {items.length === 0 ? (
           <p className="f-body text-sm text-[#14213D]/40 text-center py-10">Aucun article disponible pour l'instant.</p>
@@ -2473,11 +2482,13 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
     setNegBusy(null);
   }
   const [displayType, setDisplayType] = useState("Vêtement femme");
+  const [categoryAutoDetected, setCategoryAutoDetected] = useState(false);
   const [backgroundStyle, setBackgroundStyle] = useState("Studio blanc épuré");
   const [generatingBackground, setGeneratingBackground] = useState(false);
   const [backgroundError, setBackgroundError] = useState("");
   const [mannequinPose, setMannequinPose] = useState("Trois-quarts");
   const [mannequinStyle, setMannequinStyle] = useState("Studio épuré");
+  const [mannequinColor, setMannequinColor] = useState("Blanc");
   const [mannequinCustom, setMannequinCustom] = useState("");
   const [ensembleLabels, setEnsembleLabels] = useState({}); // { [photoUrl]: "pantalon" }
   const [mannequinError, setMannequinError] = useState("");
@@ -2506,6 +2517,28 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
   const [vwError, setVwError] = useState("");
   const myProducts = products.filter((p) => p.vendorPhone === vendorInfo.phone);
   const myOrders = orders.filter((o) => o.items.some((it) => myProducts.some((p) => p.id === it.id)));
+  const [vitrineSelected, setVitrineSelected] = useState([]);
+  const [vitrineBusy, setVitrineBusy] = useState(false);
+  const [vitrineError, setVitrineError] = useState("");
+  const [vitrineImageUrl, setVitrineImageUrl] = useState(vendorInfo.vitrineImageUrl || "");
+  useEffect(() => {
+    if (vendorInfo.vitrineImageUrl) setVitrineImageUrl(vendorInfo.vitrineImageUrl);
+  }, [vendorInfo.vitrineImageUrl]);
+  async function generateVitrine() {
+    setVitrineError("");
+    setVitrineBusy(true);
+    try {
+      const items = vitrineSelected.map((id) => {
+        const p = myProducts.find((pr) => pr.id === id);
+        return { imageUrl: p?.imageUrl, label: p?.name };
+      });
+      const { imageUrl } = await apiSend(`/api/vendors/${encodeURIComponent(vendorInfo.phone)}/generate-vitrine`, "POST", { items }, getPhoneToken(vendorInfo.phone));
+      setVitrineImageUrl(imageUrl);
+    } catch (e) {
+      setVitrineError(e.message || "Impossible de générer la vitrine pour l'instant.");
+    }
+    setVitrineBusy(false);
+  }
 
   async function loadVendorRevenue() {
     try {
@@ -2584,7 +2617,19 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
       } catch {
         url = await compressImage(file); // repli : image compressée et encodée directement
       }
-      if (target === "new") setForm((f) => ({ ...f, imageUrls: [...f.imageUrls, url] }));
+      if (target === "new") {
+        const isFirstPhoto = form.imageUrls.length === 0;
+        setForm((f) => ({ ...f, imageUrls: [...f.imageUrls, url] }));
+        // Dès la toute première photo, on demande à l'IA de deviner le type
+        // d'article, pour pré-sélectionner directement la bonne mise en
+        // scène — le vendeur n'a plus qu'à confirmer ou corriger, plutôt que
+        // de deviner lui-même parmi 14 options.
+        if (isFirstPhoto) {
+          apiSend("/api/products/detect-category", "POST", { vendorPhone: vendorInfo.phone, imageUrl: url }, getPhoneToken(vendorInfo.phone))
+            .then(({ category }) => { if (category) { setDisplayType(category); setCategoryAutoDetected(true); } })
+            .catch(() => {}); // pas grave si ça échoue, le vendeur choisit manuellement
+        }
+      }
       else setEditForm((f) => ({ ...f, imageUrls: [...(f.imageUrls || []), url] }));
     } catch {
       // photo illisible, on laisse le champ tel quel
@@ -2640,7 +2685,7 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
       const isEnsemble = displayType === "Ensemble complet (plusieurs articles)";
       const refUrls = isEnsemble ? realPhotos.slice(0, 3) : [realPhotos[0]];
       const itemLabels = isEnsemble ? refUrls.map((u) => (ensembleLabels[u] || "").trim()) : [];
-      const { imageUrl } = await apiSend("/api/products/generate-mannequin-photo", "POST", { vendorPhone: vendorInfo.phone, imageUrl: refUrls[0], imageUrls: refUrls, itemLabels, displayType, pose: mannequinPose, style: mannequinStyle, customInstructions: mannequinCustom }, getPhoneToken(vendorInfo.phone));
+      const { imageUrl } = await apiSend("/api/products/generate-mannequin-photo", "POST", { vendorPhone: vendorInfo.phone, imageUrl: refUrls[0], imageUrls: refUrls, itemLabels, displayType, pose: mannequinPose, style: mannequinStyle, mannequinColor, customInstructions: mannequinCustom }, getPhoneToken(vendorInfo.phone));
       // La photo générée passe en premier (couverture) — c'est elle que
       // l'acheteur voit en premier, avant les photos brutes du vendeur.
       // On la marque aussi comme "générée par IA" pour le badge acheteur et
@@ -2992,7 +3037,10 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                   {displayType === "Ensemble complet (plusieurs articles)" && (
                     <p className="f-body text-[10px] text-[#946B00] bg-[#946B00]/10 rounded-lg px-2 py-1.5 mb-1.5">💡 Ajoute jusqu'à 3 photos séparées (une par article : pantalon, chemise, chapeau, chaussures, montre...) dans ta galerie ci-dessus — l'IA les combinera sur un même mannequin. Au-delà de 3, seules les 3 premières seront utilisées.</p>
                   )}
-                  <select value={displayType} onChange={(e) => setDisplayType(e.target.value)} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-xs mb-1.5">
+                  {categoryAutoDetected && (
+                    <p className="f-body text-[10px] text-[#2D6A4F] bg-[#2D6A4F]/10 rounded-lg px-2 py-1 mb-1.5">🤖 Type détecté automatiquement — corrige si besoin.</p>
+                  )}
+                  <select value={displayType} onChange={(e) => { setDisplayType(e.target.value); setCategoryAutoDetected(false); }} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-xs mb-1.5">
                     <option>Vêtement femme</option>
                     <option>Vêtement homme</option>
                     <option>Costume / Tenue formelle</option>
@@ -3015,6 +3063,13 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
                       <option>Trois-quarts</option>
                       <option>Profil</option>
                       <option>Dos</option>
+                    </select>
+                  )}
+                  {(displayType === "Vêtement femme" || displayType === "Vêtement homme" || displayType === "Costume / Tenue formelle" || displayType === "Ensemble complet (plusieurs articles)") && (
+                    <select value={mannequinColor} onChange={(e) => setMannequinColor(e.target.value)} className="f-body w-full px-2 py-1.5 rounded-lg border-2 border-[#14213D]/15 bg-white text-xs mb-1.5">
+                      <option>Blanc</option>
+                      <option>Noir</option>
+                      <option>Gris</option>
                     </select>
                   )}
                   {displayType !== "Maison / Déco" && displayType !== "Véhicule / Engin" && (
@@ -3156,6 +3211,43 @@ function VendorView({ vendorInfo, registerVendor, logoutVendor, products, addPro
               {publishing ? "Publication…" : "Publier"}
             </button>
           </div>
+        </div>
+
+        <div className="ticket bg-white border-2 border-[#14213D]/10 p-4 mb-6">
+          <h3 className="f-display font-semibold text-sm text-[#14213D] mb-1">🏪 Créer ma vitrine</h3>
+          <p className="f-body text-xs text-[#14213D]/50 mb-3">Choisis jusqu'à 3 produits déjà publiés pour créer une image de vitrine professionnelle, comme dans une vraie boutique — affichée en bannière sur ta page.</p>
+          {vitrineImageUrl && (
+            <img src={enhancedImageUrl(vitrineImageUrl, 600)} alt="Ma vitrine" loading="lazy" className="w-full rounded-lg mb-3 border-2 border-[#14213D]/10" />
+          )}
+          {myProducts.length === 0 ? (
+            <p className="f-body text-xs text-[#14213D]/40">Publie d'abord des produits pour créer ta vitrine.</p>
+          ) : (
+            <>
+              <div className="flex gap-2 overflow-x-auto mb-3 pb-1">
+                {myProducts.map((p) => {
+                  const selected = vitrineSelected.includes(p.id);
+                  return (
+                    <button
+                      key={p.id}
+                      onClick={() => setVitrineSelected((cur) => selected ? cur.filter((id) => id !== p.id) : (cur.length < 3 ? [...cur, p.id] : cur))}
+                      className={`relative flex-shrink-0 w-16 h-16 rounded-lg overflow-hidden border-2 ${selected ? "border-[#2D6A4F]" : "border-[#14213D]/10"}`}
+                    >
+                      {p.imageUrl && <img src={thumbUrl(p.imageUrl, 150)} alt={p.name} loading="lazy" className="w-full h-full object-cover" />}
+                      {selected && <span className="absolute top-0.5 right-0.5 bg-[#2D6A4F] text-white rounded-full w-4 h-4 flex items-center justify-center text-[9px]">✓</span>}
+                    </button>
+                  );
+                })}
+              </div>
+              {vitrineError && <p className="f-body text-xs text-[#C1440E] mb-2">{vitrineError}</p>}
+              <button
+                onClick={generateVitrine}
+                disabled={vitrineSelected.length === 0 || vitrineBusy}
+                className="w-full bg-[#14213D] disabled:opacity-30 text-white f-display font-semibold py-2.5 rounded-full text-sm"
+              >
+                {vitrineBusy ? "Génération en cours (jusqu'à 1 min)…" : `Générer ma vitrine (${vitrineSelected.length}/3)`}
+              </button>
+            </>
+          )}
         </div>
 
         <div>
@@ -4978,6 +5070,12 @@ function App() {
           visitorId = `v${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
           localStorage.setItem("zonako_visitor_id", visitorId);
         }
+        // On ne compte une "nouvelle visite" que si plus de 30 minutes se
+        // sont écoulées depuis la dernière fois sur cet appareil — sinon un
+        // simple rafraîchissement de page compterait à tort comme un retour.
+        const lastTrackedAt = Number(localStorage.getItem("zonako_visitor_last_tracked") || 0);
+        if (Date.now() - lastTrackedAt < 30 * 60 * 1000) return;
+        localStorage.setItem("zonako_visitor_last_tracked", String(Date.now()));
         const { visitCount } = await apiSend("/api/visitors/track", "POST", { visitorId });
         const alreadyRegistered = loadProfile("buyer") || loadProfile("vendor") || loadProfile("courier");
         if (visitCount > 1 && !alreadyRegistered) setWelcomeBackNotice(true);
