@@ -786,8 +786,9 @@ app.post("/api/products/generate-description", requirePhone((req) => req.body.ve
 // détection ne fait que suggérer un point de départ, jamais un blocage.
 const MANNEQUIN_CATEGORIES = [
   "Vêtement femme", "Vêtement homme", "Costume / Tenue formelle", "Vêtement bébé / enfant",
-  "Chaussures", "Montre", "Bijoux", "Lunettes", "Sac / Accessoire", "Électronique / Téléphone",
-  "Maison / Déco", "Cuisine / Ustensiles", "Beauté / Cosmétique", "Jouet / Enfant", "Véhicule / Engin",
+  "Chaussures", "Montre", "Bijoux", "Lunettes", "Perruques / Mèches", "Sac / Accessoire", "Électronique / Téléphone",
+  "Maison / Déco", "Meubles", "Quincaillerie / Construction", "Cuisine / Ustensiles", "Alimentation / Épicerie", "Beauté / Cosmétique",
+  "Jouet / Enfant", "Tissus / Pagnes au mètre", "Véhicule / Engin",
 ];
 app.post("/api/products/detect-category", requirePhone((req) => req.body.vendorPhone), async (req, res) => {
   const { imageUrl } = req.body;
@@ -908,12 +909,17 @@ app.post("/api/products/generate-mannequin-photo", requirePhone((req) => req.bod
       "Montre": `A close-up of this exact watch worn on a neutral light-toned wrist, arm resting naturally at a slight angle, focus sharp on the watch face and strap, ${STUDIO_BASE}`,
       "Bijoux": `This exact jewelry piece elegantly presented on a minimal white jewelry display stand (bust, ring cone, or earring card as appropriate to the item type), ${STUDIO_BASE}`,
       "Lunettes": `This exact pair of glasses or sunglasses worn naturally on a mannequin head (head and shoulders only, neutral facial features, no visible eyes needed), front-facing, ${STUDIO_BASE}`,
+      "Perruques / Mèches": `This exact wig or hair extension worn naturally and neatly styled on a mannequin head and shoulders (calm neutral facial features), front-facing or slight three-quarter angle, ${STUDIO_BASE}`,
       "Sac / Accessoire": `This exact bag or accessory placed upright on a minimal round pedestal, front three-quarter angle, ${STUDIO_BASE}`,
       "Électronique / Téléphone": `This exact electronic device or phone displayed upright on a minimal tech-style pedestal stand, screen angled slightly toward camera if applicable, ${STUDIO_BASE}`,
       "Maison / Déco": `This exact home or decor item staged naturally within a tastefully minimal, softly lit interior setting (neutral shelf, table or console), giving a sense of scale and real use. ${FIDELITY}`,
+      "Meubles": `This exact furniture piece staged naturally within a tastefully minimal, softly lit interior room setting, clearly showing its real scale and how it would look in a home. ${FIDELITY}`,
+      "Quincaillerie / Construction": `This exact hardware or construction item/tool displayed neatly on a clean workshop-style surface or pegboard, practical and sturdy presentation, ${STUDIO_BASE}`,
       "Cuisine / Ustensiles": `This exact kitchen item staged neatly on a clean light-toned countertop, slight overhead-angled product shot, ${STUDIO_BASE}`,
+      "Alimentation / Épicerie": `This exact food or grocery product neatly staged on a clean light-toned surface, slight overhead-angled product shot, soft natural lighting that makes it look fresh and appetizing, no people. ${FIDELITY}`,
       "Beauté / Cosmétique": `This exact beauty or cosmetic product displayed upright on a minimal elegant vanity-style pedestal, ${STUDIO_BASE}`,
       "Jouet / Enfant": `This exact toy or children's item displayed upright on a clean minimal surface, playful but tidy product photography style, ${STUDIO_BASE}`,
+      "Tissus / Pagnes au mètre": `This exact fabric or pagne cloth elegantly draped in soft folds or neatly rolled, clearly showing its pattern, color and texture, on a clean minimal surface, ${STUDIO_BASE}`,
       "Véhicule / Engin": `This exact vehicle or machine (car, motorcycle, bicycle, or similar) displayed in a professional automotive showroom setting, clean reflective floor, dramatic professional dealership-style lighting, three-quarter angle that highlights its shape and condition, no people, no mannequin. CRITICAL: this must be the EXACT same vehicle as in the reference photo — do not alter, reinterpret, or invent its color, model, shape, condition or details in any way. Only change the setting/lighting/framing around it, never the vehicle itself.`,
     };
     const promptText = PROMPTS[displayType] || PROMPTS["Vêtement femme"];
